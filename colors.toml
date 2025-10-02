@@ -2,15 +2,22 @@
 # Edit this file to customize colors
 # After editing, copy to ~/.config/ils/colors.toml
 
-# Path line colors
-# Options:
-#   - Named colors: black, red, green, yellow, blue, magenta, cyan, white
-#                   darkgrey/darkgray, darkred, darkgreen, darkyellow, darkblue, darkmagenta, darkcyan, grey/gray
-#   - Hex colors: #RRGGBB or #RGB (e.g., "#00ff00" or "#0f0" for green)
-#   - Special: "reverse" (use reverse video), "none" (no color)
+# Color options:
+#   - Named: black, red, green, yellow, blue, magenta, cyan, white
+#            darkgrey/darkgray, darkred, darkgreen, darkyellow, darkblue, darkmagenta, darkcyan, grey/gray
+#   - Hex: #RRGGBB or #RGB (e.g., "#00ff00" or "#0f0")
+#   - Special: "reverse" (inverted colors), "none" (no color)
 
-# Foreground color for path line (default: "reverse")
+# Path bar
 path_fg = "reverse"
-
-# Background color for path line (default: "none")
 path_bg = "none"
+
+# Selected item
+selected_fg = "black"
+selected_bg = "cyan"
+
+# Directory names
+directory_fg = "cyan"
+
+# Preview pane border
+preview_border_fg = "darkgrey"

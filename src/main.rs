@@ -41,6 +41,11 @@ fn install() -> io::Result<()> {
     color_config.save()?;
     println!("✓ Created default color config: {}/.config/ils/colors.toml", home);
 
+    // Create default settings
+    let settings = Settings::default();
+    settings.save()?;
+    println!("✓ Created default settings: {}/.config/ils/settings.toml", home);
+
     // Create default preview ratio
     let preview_ratio_path = config_dir.join("preview_ratio");
     fs::write(&preview_ratio_path, "0.5")?;
@@ -124,6 +129,7 @@ struct Keybindings {
     preview_down: Vec<char>,
     preview_height_decrease: Vec<char>,
     preview_height_increase: Vec<char>,
+    toggle_hidden: Vec<char>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -132,6 +138,14 @@ struct ColorConfig {
     path_fg: String,
     #[serde(default = "default_path_bg")]
     path_bg: String,
+    #[serde(default = "default_selected_fg")]
+    selected_fg: String,
+    #[serde(default = "default_selected_bg")]
+    selected_bg: String,
+    #[serde(default = "default_directory_fg")]
+    directory_fg: String,
+    #[serde(default = "default_preview_border_fg")]
+    preview_border_fg: String,
 }
 
 fn default_path_fg() -> String {
@@ -142,11 +156,76 @@ fn default_path_bg() -> String {
     "none".to_string()
 }
 
+fn default_selected_fg() -> String {
+    "black".to_string()
+}
+
+fn default_selected_bg() -> String {
+    "cyan".to_string()
+}
+
+fn default_directory_fg() -> String {
+    "cyan".to_string()
+}
+
+fn default_preview_border_fg() -> String {
+    "darkgrey".to_string()
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Settings {
+    #[serde(default = "default_exit_after_edit")]
+    exit_after_edit: bool,
+}
+
+fn default_exit_after_edit() -> bool {
+    false
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            exit_after_edit: default_exit_after_edit(),
+        }
+    }
+}
+
+impl Settings {
+    fn load() -> Self {
+        if let Ok(home) = env::var("HOME") {
+            let config_path = PathBuf::from(home).join(".config/ils/settings.toml");
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                if let Ok(config) = toml::from_str(&content) {
+                    return config;
+                }
+            }
+        }
+        Self::default()
+    }
+
+    fn save(&self) -> io::Result<()> {
+        if let Ok(home) = env::var("HOME") {
+            let config_dir = PathBuf::from(home).join(".config/ils");
+            fs::create_dir_all(&config_dir)?;
+            let config_path = config_dir.join("settings.toml");
+            let content = toml::to_string_pretty(self).map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, e)
+            })?;
+            fs::write(config_path, content)?;
+        }
+        Ok(())
+    }
+}
+
 impl Default for ColorConfig {
     fn default() -> Self {
         ColorConfig {
             path_fg: default_path_fg(),
             path_bg: default_path_bg(),
+            selected_fg: default_selected_fg(),
+            selected_bg: default_selected_bg(),
+            directory_fg: default_directory_fg(),
+            preview_border_fg: default_preview_border_fg(),
         }
     }
 }
@@ -183,6 +262,22 @@ impl ColorConfig {
 
     fn parse_bg_color(&self) -> Option<Color> {
         Self::parse_color_string(&self.path_bg)
+    }
+
+    fn parse_selected_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.selected_fg)
+    }
+
+    fn parse_selected_bg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.selected_bg)
+    }
+
+    fn parse_directory_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.directory_fg)
+    }
+
+    fn parse_preview_border_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.preview_border_fg)
     }
 
     fn parse_color_string(color_str: &str) -> Option<Color> {
@@ -257,6 +352,7 @@ impl Default for Keybindings {
             preview_down: vec!['o'],
             preview_height_decrease: vec!['-', '_'],
             preview_height_increase: vec!['+', '='],
+            toggle_hidden: vec!['.'],
         }
     }
 }
@@ -305,8 +401,10 @@ struct FileBrowser {
     preview_scroll_map: HashMap<PathBuf, usize>, // Per-file scroll positions
     preview_split_ratio: f32, // Ratio of screen for preview (0.0-1.0)
     show_help: bool, // Whether to show help screen
+    show_hidden: bool, // Whether to show hidden files
     keybindings: Keybindings,
     color_config: ColorConfig,
+    settings: Settings,
     preview_cache: HashMap<PathBuf, Vec<String>>, // Cache preview content
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
@@ -340,6 +438,9 @@ impl FileBrowser {
             defaults
         };
 
+        // Load settings
+        let settings = Settings::load();
+
         // start drawing content on the row *after* the initial position
         let mut browser = FileBrowser {
             current_dir: start_dir,
@@ -354,8 +455,10 @@ impl FileBrowser {
             preview_scroll_map: HashMap::new(),
             preview_split_ratio,
             show_help,
+            show_hidden: false,
             keybindings,
             color_config,
+            settings,
             preview_cache: HashMap::new(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
@@ -416,13 +519,15 @@ impl FileBrowser {
             .map(|e| e.path())
             .collect();
 
-        // Filter out hidden files (starting with '.')
-        entries.retain(|path| {
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| !n.starts_with('.'))
-                .unwrap_or(true)
-        });
+        // Filter out hidden files (starting with '.') if show_hidden is false
+        if !self.show_hidden {
+            entries.retain(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| !n.starts_with('.'))
+                    .unwrap_or(true)
+            });
+        }
 
         // Sort: directories first, then alphabetically
         entries.sort_by(|a, b| {
@@ -611,9 +716,20 @@ impl FileBrowser {
                     let full_cell = format!("{}{:<width$}", prefix, display_name, width = NAME_WIDTH);
 
                     if is_selected {
-                        queue!(stdout, SetForegroundColor(Color::Green))?;
+                        // Apply selected colors
+                        if let Some(fg) = self.color_config.parse_selected_fg() {
+                            queue!(stdout, SetForegroundColor(fg))?;
+                        }
+                        if let Some(bg) = self.color_config.parse_selected_bg() {
+                            queue!(stdout, crossterm::style::SetBackgroundColor(bg))?;
+                        }
                     } else if is_dir {
-                        queue!(stdout, SetForegroundColor(Color::Blue))?;
+                        // Apply directory color
+                        if let Some(fg) = self.color_config.parse_directory_fg() {
+                            queue!(stdout, SetForegroundColor(fg))?;
+                        } else {
+                            queue!(stdout, SetForegroundColor(Color::Blue))?;
+                        }
                     } else {
                         queue!(stdout, ResetColor)?;
                     }
@@ -628,12 +744,13 @@ impl FileBrowser {
         // 3. Draw separator and preview if in preview mode
         if self.preview_mode {
             queue!(stdout, cursor::MoveTo(0, split_line))?;
-            queue!(
-                stdout,
-                SetForegroundColor(Color::DarkGrey),
-                Print("─".repeat(width as usize)),
-                ResetColor
-            )?;
+
+            if let Some(border_color) = self.color_config.parse_preview_border_fg() {
+                queue!(stdout, SetForegroundColor(border_color))?;
+            } else {
+                queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+            }
+            queue!(stdout, Print("─".repeat(width as usize)), ResetColor)?;
 
             // Draw preview
             if let Some(selected) = self.get_selected_path() {
@@ -724,6 +841,7 @@ impl FileBrowser {
             "  i / o              -  Scroll preview up/down (10 lines)",
             "  Shift+I / Shift+O  -  Scroll preview faster",
             "  - / +              -  Decrease/increase preview height",
+            "  .                  -  Toggle hidden files",
             "  ?                  -  Toggle this help",
             "  q / Esc            -  Quit",
             "",
@@ -949,6 +1067,11 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                                     .arg(&selected_path)
                                     .status();
 
+                                // Check if we should exit after editing
+                                if browser.settings.exit_after_edit {
+                                    return Ok(Some(browser.get_current_dir().clone()));
+                                }
+
                                 // Re-enable raw mode
                                 execute!(io::stdout(), cursor::Hide)?;
                                 terminal::enable_raw_mode()?;
@@ -974,6 +1097,12 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                         browser.preview_mode = !browser.preview_mode;
                         continue;
                     }
+                    if browser.keybindings.contains(&browser.keybindings.toggle_hidden, ch) {
+                        browser.show_hidden = !browser.show_hidden;
+                        browser.load_entries()?;
+                        browser.update_layout()?;
+                        continue;
+                    }
                     if browser.keybindings.contains(&browser.keybindings.preview_height_decrease, ch) {
                         if browser.preview_mode {
                             browser.preview_split_ratio = (browser.preview_split_ratio - 0.1).max(0.2);
@@ -983,7 +1112,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                     }
                     if browser.keybindings.contains(&browser.keybindings.preview_height_increase, ch) {
                         if browser.preview_mode {
-                            browser.preview_split_ratio = (browser.preview_split_ratio + 0.1).min(0.8);
+                            browser.preview_split_ratio = (browser.preview_split_ratio + 0.1).min(1.0);
                             let _ = browser.save_preview_ratio();
                         }
                         continue;
