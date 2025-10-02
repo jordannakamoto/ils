@@ -4,7 +4,14 @@ Interactive file browser for the terminal.
 
 ## Features
 
-- Customizable keybindings via TOML   - defaults are wasd and j (back dir) l (forward dir) space (cd/edit file)
+- Customizable keybindings via TOML
+  defaults:
+- movement = wasd
+- back/fwd directory = j/l
+- cd folder or open file = space
+- home directory = h
+- toggle hidden folders = .
+- show help = ?
 - File preview with syntax highlighting
 - Opens files in default shell `$EDITOR`
 
