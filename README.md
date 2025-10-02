@@ -4,12 +4,9 @@ Interactive file browser for the terminal.
 
 ## Features
 
+- Customizable keybindings via TOML   - defaults are wasd and j (back dir) l (forward dir) space (cd/edit file)
 - File preview with syntax highlighting
-- Customizable keybindings via TOML
-- Navigate with arrows or WASD
-- Adjustable preview pane that persists between sessions
-- Opens files in `$EDITOR` or cd into directories
-- Lazy loading for large directories
+- Opens files in default shell `$EDITOR`
 
 ## Install
 
@@ -26,27 +23,7 @@ The installer creates `~/.config/ils/` and adds a shell function to your rc file
 ```bash
 ils
 ```
-
-### Keybindings
-
-**Navigation**
-- `w`/`↑` - up
-- `s`/`↓` - down
-- `a`/`←` - left
-- `d`/`→` - right
-- `l`/`Enter` - open directory
-- `j`/`b`/`Backspace` - go back
-- `h` - go home
-
-**Actions**
-- `Space` - select (opens files in `$EDITOR`, cd into directories)
-- `q`/`Esc` - quit
-
-**Preview**
-- `p` - toggle preview
-- `i`/`o` - scroll preview
-- `Shift+I`/`Shift+O` - scroll faster
-- `-`/`+` - adjust height
+? - for help
 
 ## Configuration
 
