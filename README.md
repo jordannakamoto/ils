@@ -2,6 +2,10 @@
 
 Interactive file browser for the terminal.
 
+https://github.com/user-attachments/assets/715f8df6-77b7-42a5-8ebf-9776ef61292f
+
+
+
 ## Features
 
 - Customizable keybindings via TOML
