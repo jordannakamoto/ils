@@ -2481,8 +2481,12 @@ ils() {
     }
     terminal::disable_raw_mode()?;
 
-    // Create default config
-    Config::create_default()?;
+    // Create default config only if it doesn't exist
+    if let Some(config_path) = Config::path() {
+        if !config_path.exists() {
+            Config::create_default()?;
+        }
+    }
     execute!(io::stdout(), terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
 
     Ok(())
