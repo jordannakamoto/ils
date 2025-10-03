@@ -1,6 +1,6 @@
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, ClearType},
@@ -16,7 +16,7 @@ use std::{
 };
 use syntect::{
     easy::HighlightLines,
-    highlighting::{Style, ThemeSet},
+    highlighting::ThemeSet,
     parsing::SyntaxSet,
     util::as_24_bit_terminal_escaped,
 };
