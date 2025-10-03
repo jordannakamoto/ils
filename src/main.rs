@@ -385,6 +385,10 @@ up = ['w']
 down = ['s']
 left = ['a']
 right = ['d']
+jump_up = ['W']
+jump_down = ['S']
+jump_left = ['A']
+jump_right = ['D']
 
 # Actions
 open = ['l']                    # Open file/directory
@@ -392,7 +396,7 @@ back = ['j', 'b']              # Go back up one directory
 home = ['h']                    # Go to home directory
 quit = ['q']                    # Quit without cd
 quit_then_open_in_finder = ['Q'] # Quit and open current directory in Finder (Shift+q)
-help = ['?']                    # Show help screen
+help = ['!']                    # Show help screen
 
 # Preview controls
 preview_toggle = ['p']          # Toggle preview pane
