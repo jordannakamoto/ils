@@ -122,6 +122,7 @@ struct Keybindings {
     back: Vec<char>,
     home: Vec<char>,
     quit: Vec<char>,
+    quit_then_open_in_finder: Vec<char>,
     help: Vec<char>,
     preview_toggle: Vec<char>,
     preview_up: Vec<char>,
@@ -132,7 +133,16 @@ struct Keybindings {
     fuzzy_find: Vec<char>,
     fuzzy_back: Vec<char>,
     fuzzy_home: Vec<char>,
-    open_in_finder: Vec<char>,
+    toggle_mode: Vec<char>,
+    rename: Vec<char>,
+    next_sibling: Vec<char>,
+    prev_sibling: Vec<char>,
+    copy: Vec<char>,
+    paste: Vec<char>,
+    trash: Vec<char>,
+    delete: Vec<char>,
+    undo: Vec<char>,
+    redo: Vec<char>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -147,8 +157,22 @@ struct ColorConfig {
     selected_bg: String,
     #[serde(default = "default_directory_fg")]
     directory_fg: String,
+    #[serde(default = "default_directory_bg")]
+    directory_bg: String,
+    #[serde(default = "default_file_fg")]
+    file_fg: String,
+    #[serde(default = "default_file_bg")]
+    file_bg: String,
     #[serde(default = "default_preview_border_fg")]
     preview_border_fg: String,
+    #[serde(default = "default_cursor_fg")]
+    cursor_fg: String,
+    #[serde(default = "default_cursor_bg")]
+    cursor_bg: String,
+    #[serde(default = "default_fuzzy_highlight_fg")]
+    fuzzy_highlight_fg: String,
+    #[serde(default = "default_fuzzy_highlight_bg")]
+    fuzzy_highlight_bg: String,
 }
 
 fn default_path_fg() -> String {
@@ -171,8 +195,36 @@ fn default_directory_fg() -> String {
     "cyan".to_string()
 }
 
+fn default_directory_bg() -> String {
+    "none".to_string()
+}
+
+fn default_file_fg() -> String {
+    "none".to_string()
+}
+
+fn default_file_bg() -> String {
+    "none".to_string()
+}
+
 fn default_preview_border_fg() -> String {
     "darkgrey".to_string()
+}
+
+fn default_cursor_fg() -> String {
+    "green".to_string()
+}
+
+fn default_cursor_bg() -> String {
+    "none".to_string()
+}
+
+fn default_fuzzy_highlight_fg() -> String {
+    "#ffff00".to_string()
+}
+
+fn default_fuzzy_highlight_bg() -> String {
+    "#323232".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -183,6 +235,14 @@ struct Settings {
     preview_scroll_amount: usize,
     #[serde(default = "default_show_hidden")]
     show_hidden: bool,
+    #[serde(default = "default_preview_on_start")]
+    preview_on_start: bool,
+    #[serde(default = "default_preview_split_ratio")]
+    preview_split_ratio: f32,
+    #[serde(default = "default_case_sensitive_search")]
+    case_sensitive_search: bool,
+    #[serde(default = "default_show_dir_slash")]
+    show_dir_slash: bool,
 }
 
 fn default_exit_after_edit() -> bool {
@@ -197,12 +257,32 @@ fn default_show_hidden() -> bool {
     false
 }
 
+fn default_preview_on_start() -> bool {
+    false
+}
+
+fn default_preview_split_ratio() -> f32 {
+    0.5
+}
+
+fn default_case_sensitive_search() -> bool {
+    false
+}
+
+fn default_show_dir_slash() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             exit_after_edit: default_exit_after_edit(),
             preview_scroll_amount: default_preview_scroll_amount(),
             show_hidden: default_show_hidden(),
+            preview_on_start: default_preview_on_start(),
+            preview_split_ratio: default_preview_split_ratio(),
+            case_sensitive_search: default_case_sensitive_search(),
+            show_dir_slash: default_show_dir_slash(),
         }
     }
 }
@@ -223,8 +303,12 @@ impl Config {
         if let Ok(home) = env::var("HOME") {
             let config_path = PathBuf::from(home).join(".config/ils/config.toml");
             if let Ok(content) = fs::read_to_string(&config_path) {
-                if let Ok(config) = toml::from_str(&content) {
-                    return config;
+                match toml::from_str(&content) {
+                    Ok(config) => return config,
+                    Err(e) => {
+                        eprintln!("\x1b[31mError loading config from {}: {}\x1b[0m", config_path.display(), e);
+                        eprintln!("\x1b[33mUsing default configuration. Run 'ils config' to fix.\x1b[0m");
+                    }
                 }
             }
         }
@@ -263,6 +347,7 @@ open = ['l']                    # Open file/directory
 back = ['j', 'b']              # Go back up one directory
 home = ['h']                    # Go to home directory
 quit = ['q']                    # Quit without cd
+quit_then_open_in_finder = ['Q'] # Quit and open current directory in Finder (Shift+q)
 help = ['?']                    # Show help screen
 
 # Preview controls
@@ -280,8 +365,17 @@ fuzzy_find = ['/']             # Enter fuzzy find mode
 fuzzy_back = ['/']             # Go back one directory (in fuzzy mode)
 fuzzy_home = ['?']             # Go to home directory (in fuzzy mode)
 
-# Special
-open_in_finder = ['Q']         # Open current directory in Finder (Shift+q)
+# Other
+toggle_mode = ['m']            # Toggle between list and grid mode
+rename = ['r']                 # Rename selected file
+next_sibling = ['n']           # Go to next sibling directory
+prev_sibling = ['N']           # Go to previous sibling directory (Shift+n)
+copy = ['c']                   # Copy selected file to clipboard
+paste = ['v']                  # Paste from clipboard
+trash = ['x']                  # Move to trash
+delete = ['X']                 # Permanently delete (Shift+x)
+undo = ['z']                   # Undo last action
+redo = ['Z']                   # Redo last undone action (Shift+z)
 
 # ============================================================================
 # COLORS
@@ -303,9 +397,22 @@ selected_bg = "none"
 
 # Directory names
 directory_fg = "cyan"
+directory_bg = "none"
+
+# File names
+file_fg = "none"
+file_bg = "none"
 
 # Preview pane border
 preview_border_fg = "darkgrey"
+
+# Cursor (">")
+cursor_fg = "green"
+cursor_bg = "none"
+
+# Fuzzy find highlighting
+fuzzy_highlight_fg = "#ffff00"
+fuzzy_highlight_bg = "#323232"
 
 # ============================================================================
 # SETTINGS
@@ -320,6 +427,18 @@ preview_scroll_amount = 10
 
 # Show hidden files by default (default: false)
 show_hidden = false
+
+# Show preview pane on start (default: false)
+preview_on_start = false
+
+# Preview pane height ratio (0.0-1.0, default: 0.5)
+preview_split_ratio = 0.5
+
+# Case sensitive fuzzy find search (default: false)
+case_sensitive_search = false
+
+# Show trailing slash on directories (default: true)
+show_dir_slash = true
 "##;
 
             fs::write(&config_path, default_config)?;
@@ -361,7 +480,14 @@ impl Default for ColorConfig {
             selected_fg: default_selected_fg(),
             selected_bg: default_selected_bg(),
             directory_fg: default_directory_fg(),
+            directory_bg: default_directory_bg(),
+            file_fg: default_file_fg(),
+            file_bg: default_file_bg(),
             preview_border_fg: default_preview_border_fg(),
+            cursor_fg: default_cursor_fg(),
+            cursor_bg: default_cursor_bg(),
+            fuzzy_highlight_fg: default_fuzzy_highlight_fg(),
+            fuzzy_highlight_bg: default_fuzzy_highlight_bg(),
         }
     }
 }
@@ -412,8 +538,36 @@ impl ColorConfig {
         Self::parse_color_string(&self.directory_fg)
     }
 
+    fn parse_directory_bg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.directory_bg)
+    }
+
+    fn parse_file_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.file_fg)
+    }
+
+    fn parse_file_bg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.file_bg)
+    }
+
     fn parse_preview_border_fg(&self) -> Option<Color> {
         Self::parse_color_string(&self.preview_border_fg)
+    }
+
+    fn parse_cursor_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.cursor_fg)
+    }
+
+    fn parse_cursor_bg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.cursor_bg)
+    }
+
+    fn parse_fuzzy_highlight_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.fuzzy_highlight_fg)
+    }
+
+    fn parse_fuzzy_highlight_bg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.fuzzy_highlight_bg)
     }
 
     fn parse_color_string(color_str: &str) -> Option<Color> {
@@ -481,6 +635,7 @@ impl Default for Keybindings {
             back: vec!['j', 'b'],
             home: vec!['h'],
             quit: vec!['q'],
+            quit_then_open_in_finder: vec!['Q'],
             help: vec!['?'],
             preview_toggle: vec!['p'],
             preview_up: vec!['i'],
@@ -491,7 +646,16 @@ impl Default for Keybindings {
             fuzzy_find: vec!['/'],
             fuzzy_back: vec!['/'],
             fuzzy_home: vec!['?'],
-            open_in_finder: vec!['Q'],
+            toggle_mode: vec!['m'],
+            rename: vec!['r'],
+            next_sibling: vec!['n'],
+            prev_sibling: vec!['N'],
+            copy: vec!['c'],
+            paste: vec!['v'],
+            trash: vec!['x'],
+            delete: vec!['X'],
+            undo: vec!['z'],
+            redo: vec!['Z'],
         }
     }
 }
@@ -527,6 +691,14 @@ impl Keybindings {
     }
 }
 
+// Action for undo/redo
+#[derive(Clone)]
+enum UndoAction {
+    Copy { src: PathBuf, dest: PathBuf },
+    Move { src: PathBuf, dest: PathBuf },
+    Delete { path: PathBuf, was_dir: bool },
+}
+
 struct FileBrowser {
     current_dir: PathBuf,
     entries: Vec<PathBuf>,
@@ -544,6 +716,10 @@ struct FileBrowser {
     fuzzy_mode: bool, // Whether fuzzy find mode is active
     fuzzy_query: String, // Current fuzzy search query
     fuzzy_prev_count: usize, // Previous match count for fuzzy finder
+    list_mode: bool, // Whether to show in list mode (vs grid mode)
+    clipboard: Option<PathBuf>, // Copied file/directory path
+    undo_stack: Vec<UndoAction>, // Undo history
+    redo_stack: Vec<UndoAction>, // Redo history
     keybindings: Keybindings,
     color_config: ColorConfig,
     settings: Settings,
@@ -555,9 +731,6 @@ struct FileBrowser {
 impl FileBrowser {
     fn new(start_dir: PathBuf) -> io::Result<Self> {
         let (_, row) = cursor::position()?;
-
-        // Load saved preview split ratio
-        let preview_split_ratio = Self::load_preview_ratio().unwrap_or(0.5);
 
         // Load unified config or create default if not exists
         let config = if let Some(config_path) = Config::path() {
@@ -578,6 +751,9 @@ impl FileBrowser {
         let color_config = config.colors;
         let settings = config.settings;
 
+        // Load saved preview split ratio (use saved value if exists, otherwise use config)
+        let preview_split_ratio = Self::load_preview_ratio().unwrap_or(settings.preview_split_ratio);
+
         // start drawing content on the row *after* the initial position
         let mut browser = FileBrowser {
             current_dir: start_dir,
@@ -587,8 +763,8 @@ impl FileBrowser {
             num_cols: 1,
             start_row: row,
             breadcrumbs: Vec::new(),
-            show_dir_slash: false, // Config: show trailing slash for directories
-            preview_mode: false,
+            show_dir_slash: settings.show_dir_slash,
+            preview_mode: settings.preview_on_start,
             preview_scroll_map: HashMap::new(),
             preview_split_ratio,
             show_help,
@@ -596,6 +772,10 @@ impl FileBrowser {
             fuzzy_mode: false,
             fuzzy_query: String::new(),
             fuzzy_prev_count: 0,
+            list_mode: false,
+            clipboard: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             keybindings,
             color_config,
             settings,
@@ -708,9 +888,6 @@ impl FileBrowser {
         // Fixed cell width: 20 characters for name + 2 for prefix
         const CELL_WIDTH: usize = 22;
 
-        // Calculate max columns that can fit
-        let max_cols = (term_width / CELL_WIDTH).max(1);
-
         // Calculate available rows for content (subtract header and footer)
         let available_rows = term_height.saturating_sub(self.start_row as usize).saturating_sub(2);
 
@@ -718,32 +895,40 @@ impl FileBrowser {
         // Distribute into a square-like layout (cols ≈ rows)
         let num_entries = self.entries.len().max(1);
 
-        // Start with square root as ideal column count
-        let ideal_cols = (num_entries as f64).sqrt().ceil() as usize;
-        let ideal_cols = ideal_cols.clamp(1, max_cols);
+        // In list mode, always use 1 column
+        if self.list_mode {
+            self.num_cols = 1;
+        } else {
+            // Calculate max columns that can fit
+            let max_cols = (term_width / CELL_WIDTH).max(1);
 
-        let mut best_cols = ideal_cols;
-        let mut best_score = usize::MAX;
+            // Start with square root as ideal column count
+            let ideal_cols = (num_entries as f64).sqrt().ceil() as usize;
+            let ideal_cols = ideal_cols.clamp(1, max_cols);
 
-        // Try column counts around the ideal, find the one closest to square that fits
-        for cols in 1..=max_cols {
-            let rows_needed = (num_entries + cols - 1) / cols;
-            if rows_needed <= available_rows {
-                // Score based on how close to square (minimize abs difference between cols and rows)
-                let score = if cols > rows_needed {
-                    cols - rows_needed
-                } else {
-                    rows_needed - cols
-                };
+            let mut best_cols = ideal_cols;
+            let mut best_score = usize::MAX;
 
-                if score < best_score {
-                    best_score = score;
-                    best_cols = cols;
+            // Try column counts around the ideal, find the one closest to square that fits
+            for cols in 1..=max_cols {
+                let rows_needed = (num_entries + cols - 1) / cols;
+                if rows_needed <= available_rows {
+                    // Score based on how close to square (minimize abs difference between cols and rows)
+                    let score = if cols > rows_needed {
+                        cols - rows_needed
+                    } else {
+                        rows_needed - cols
+                    };
+
+                    if score < best_score {
+                        best_score = score;
+                        best_cols = cols;
+                    }
                 }
             }
-        }
 
-        self.num_cols = best_cols;
+            self.num_cols = best_cols;
+        }
 
         // Ensure selected index is valid after layout change
         if !self.entries.is_empty() {
@@ -854,14 +1039,14 @@ impl FileBrowser {
                         .and_then(|n| n.to_str())
                         .unwrap_or("?");
 
-                    // Truncate name if needed
+                    // Truncate name if needed (unless in list mode)
                     let mut display_name = if is_dir && self.show_dir_slash {
                         format!("{}/", name)
                     } else {
                         name.to_string()
                     };
 
-                    if display_name.len() > NAME_WIDTH {
+                    if !self.list_mode && display_name.len() > NAME_WIDTH {
                         display_name.truncate(NAME_WIDTH - 1);
                         display_name.push('~');
                     }
@@ -870,8 +1055,12 @@ impl FileBrowser {
 
                     // Check if this entry matches the fuzzy query
                     let query_len = if self.fuzzy_mode && !self.fuzzy_query.is_empty() {
-                        let query_lower = self.fuzzy_query.to_lowercase();
-                        if name.to_lowercase().starts_with(&query_lower) {
+                        let (query_cmp, name_cmp) = if self.settings.case_sensitive_search {
+                            (self.fuzzy_query.clone(), name.to_string())
+                        } else {
+                            (self.fuzzy_query.to_lowercase(), name.to_lowercase())
+                        };
+                        if name_cmp.starts_with(&query_cmp) {
                             self.fuzzy_query.len().min(display_name.len())
                         } else {
                             0
@@ -880,9 +1069,21 @@ impl FileBrowser {
                         0
                     };
 
-                    // Print prefix
+                    // Print prefix with cursor color
+                    if is_selected {
+                        // Apply cursor colors for the ">" prefix
+                        if let Some(cursor_color) = self.color_config.parse_cursor_fg() {
+                            queue!(stdout, SetForegroundColor(cursor_color))?;
+                        } else {
+                            queue!(stdout, SetForegroundColor(Color::Green))?;
+                        }
+                        if let Some(cursor_bg) = self.color_config.parse_cursor_bg() {
+                            queue!(stdout, crossterm::style::SetBackgroundColor(cursor_bg))?;
+                        }
+                    }
                     queue!(stdout, Print(prefix))?;
 
+                    // Now set the colors for the filename
                     if is_selected {
                         // Apply selected colors
                         if let Some(fg) = self.color_config.parse_selected_fg() {
@@ -894,22 +1095,41 @@ impl FileBrowser {
                             queue!(stdout, crossterm::style::SetBackgroundColor(bg))?;
                         }
                     } else if is_dir {
-                        // Apply directory color
+                        // Apply directory colors
                         if let Some(fg) = self.color_config.parse_directory_fg() {
                             queue!(stdout, SetForegroundColor(fg))?;
                         } else {
                             queue!(stdout, SetForegroundColor(Color::Blue))?;
                         }
+                        if let Some(bg) = self.color_config.parse_directory_bg() {
+                            queue!(stdout, crossterm::style::SetBackgroundColor(bg))?;
+                        }
                     } else {
-                        queue!(stdout, ResetColor)?;
+                        // Apply file colors
+                        if let Some(fg) = self.color_config.parse_file_fg() {
+                            queue!(stdout, SetForegroundColor(fg))?;
+                        } else {
+                            queue!(stdout, ResetColor)?;
+                        }
+                        if let Some(bg) = self.color_config.parse_file_bg() {
+                            queue!(stdout, crossterm::style::SetBackgroundColor(bg))?;
+                        }
                     }
 
                     // Print name with fuzzy match highlighting
                     if query_len > 0 {
-                        // Print matching part in bright yellow with bold and dark background
+                        // Print matching part with fuzzy highlight colors
                         queue!(stdout, crossterm::style::SetAttribute(crossterm::style::Attribute::Bold))?;
-                        queue!(stdout, SetForegroundColor(Color::Rgb { r: 255, g: 255, b: 0 }))?;
-                        queue!(stdout, crossterm::style::SetBackgroundColor(Color::Rgb { r: 50, g: 50, b: 50 }))?;
+                        if let Some(fg) = self.color_config.parse_fuzzy_highlight_fg() {
+                            queue!(stdout, SetForegroundColor(fg))?;
+                        } else {
+                            queue!(stdout, SetForegroundColor(Color::Rgb { r: 255, g: 255, b: 0 }))?;
+                        }
+                        if let Some(bg) = self.color_config.parse_fuzzy_highlight_bg() {
+                            queue!(stdout, crossterm::style::SetBackgroundColor(bg))?;
+                        } else {
+                            queue!(stdout, crossterm::style::SetBackgroundColor(Color::Rgb { r: 50, g: 50, b: 50 }))?;
+                        }
                         queue!(stdout, Print(&display_name[..query_len]))?;
                         queue!(stdout, crossterm::style::SetAttribute(crossterm::style::Attribute::Reset))?;
 
@@ -1050,10 +1270,22 @@ impl FileBrowser {
             "",
             "NAVIGATION:",
             "  wasd / ↑↓←→        -  Move cursor",
-            "  l / Enter          -  Open directory/file",
+            "  l / Enter / k      -  Open directory/file",
             "  j / b / Backspace  -  Go back",
             "  h                  -  Go home",
+            "  n                  -  Next sibling directory",
+            "  Shift+n            -  Previous sibling directory",
             "  .                  -  Toggle hidden files",
+            "  m                  -  Toggle list/grid mode",
+            "",
+            "FILE OPERATIONS:",
+            "  r                  -  Rename selected file",
+            "  c                  -  Copy to clipboard",
+            "  v                  -  Paste from clipboard",
+            "  x                  -  Move to trash",
+            "  Shift+x            -  Permanently delete (with warning)",
+            "  z                  -  Undo last action",
+            "  Shift+z            -  Redo",
             "",
             "FUZZY FIND:",
             "  /                  -  Enter fuzzy find mode",
@@ -1126,12 +1358,15 @@ impl FileBrowser {
             return (None, 0);
         }
 
-        let query_lower = self.fuzzy_query.to_lowercase();
-
         let matches: Vec<usize> = self.entries.iter().enumerate()
             .filter_map(|(idx, entry)| {
                 if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
-                    if name.to_lowercase().starts_with(&query_lower) {
+                    let matches = if self.settings.case_sensitive_search {
+                        name.starts_with(&self.fuzzy_query)
+                    } else {
+                        name.to_lowercase().starts_with(&self.fuzzy_query.to_lowercase())
+                    };
+                    if matches {
                         Some(idx)
                     } else {
                         None
@@ -1190,6 +1425,246 @@ impl FileBrowser {
 
     fn get_selected_path(&self) -> Option<PathBuf> {
         self.entries.get(self.selected).cloned()
+    }
+
+    fn go_to_next_sibling(&mut self) -> io::Result<()> {
+        // Go up to parent, then navigate to next sibling directory
+        if let Some(parent) = self.current_dir.parent() {
+            let current_name = self.current_dir.file_name();
+
+            // Read parent directory
+            let mut siblings: Vec<PathBuf> = fs::read_dir(parent)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+
+            // If there are no siblings or only one (current), do nothing
+            if siblings.len() <= 1 {
+                return Ok(());
+            }
+
+            // Sort siblings
+            siblings.sort();
+
+            // Find current directory in siblings
+            if let Some(current_idx) = siblings.iter().position(|p| p.file_name() == current_name) {
+                // Go to next sibling (wrap around)
+                let next_idx = (current_idx + 1) % siblings.len();
+                self.current_dir = siblings[next_idx].clone();
+                self.breadcrumbs.pop();
+                if let Some(name) = self.current_dir.file_name().and_then(|n| n.to_str()) {
+                    self.breadcrumbs.push(name.to_string());
+                }
+                self.load_entries()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn go_to_prev_sibling(&mut self) -> io::Result<()> {
+        // Go up to parent, then navigate to previous sibling directory
+        if let Some(parent) = self.current_dir.parent() {
+            let current_name = self.current_dir.file_name();
+
+            // Read parent directory
+            let mut siblings: Vec<PathBuf> = fs::read_dir(parent)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+
+            // If there are no siblings or only one (current), do nothing
+            if siblings.len() <= 1 {
+                return Ok(());
+            }
+
+            // Sort siblings
+            siblings.sort();
+
+            // Find current directory in siblings
+            if let Some(current_idx) = siblings.iter().position(|p| p.file_name() == current_name) {
+                // Go to previous sibling (wrap around)
+                let prev_idx = if current_idx == 0 {
+                    siblings.len() - 1
+                } else {
+                    current_idx - 1
+                };
+                self.current_dir = siblings[prev_idx].clone();
+                self.breadcrumbs.pop();
+                if let Some(name) = self.current_dir.file_name().and_then(|n| n.to_str()) {
+                    self.breadcrumbs.push(name.to_string());
+                }
+                self.load_entries()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_to_clipboard(&mut self) {
+        if let Some(path) = self.get_selected_path() {
+            self.clipboard = Some(path);
+        }
+    }
+
+    fn paste_from_clipboard(&mut self) -> io::Result<()> {
+        if let Some(src) = &self.clipboard {
+            if !src.exists() {
+                return Ok(()); // Source no longer exists
+            }
+
+            let file_name = src.file_name().unwrap();
+            let mut dest = self.current_dir.join(file_name);
+
+            // Handle name conflicts
+            let mut counter = 1;
+            while dest.exists() {
+                let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("");
+                let new_name = if ext.is_empty() {
+                    format!("{} ({})", stem, counter)
+                } else {
+                    format!("{} ({}).{}", stem, counter, ext)
+                };
+                dest = self.current_dir.join(new_name);
+                counter += 1;
+            }
+
+            // Copy file or directory recursively
+            if src.is_dir() {
+                self.copy_dir_recursive(src, &dest)?;
+            } else {
+                fs::copy(src, &dest)?;
+            }
+
+            self.undo_stack.push(UndoAction::Copy {
+                src: src.clone(),
+                dest: dest.clone()
+            });
+            self.redo_stack.clear();
+            self.load_entries()?;
+        }
+        Ok(())
+    }
+
+    fn copy_dir_recursive(&self, src: &PathBuf, dest: &PathBuf) -> io::Result<()> {
+        fs::create_dir_all(dest)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dest_path = dest.join(entry.file_name());
+
+            if src_path.is_dir() {
+                self.copy_dir_recursive(&src_path, &dest_path)?;
+            } else {
+                fs::copy(&src_path, &dest_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn move_to_trash(&mut self) -> io::Result<()> {
+        if let Some(path) = self.get_selected_path() {
+            // Use macOS trash command
+            let output = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(format!("tell application \"Finder\" to delete POSIX file \"{}\"", path.display()))
+                .output()?;
+
+            if output.status.success() {
+                self.undo_stack.push(UndoAction::Move {
+                    src: path.clone(),
+                    dest: PathBuf::from("~/.Trash").join(path.file_name().unwrap())
+                });
+                self.redo_stack.clear();
+                self.load_entries()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_permanent(&mut self) -> io::Result<()> {
+        if let Some(path) = self.get_selected_path() {
+            // Disable raw mode to show confirmation
+            terminal::disable_raw_mode()?;
+            execute!(io::stdout(), cursor::Show)?;
+
+            print!("\nPermanently delete '{}'? This cannot be undone! (y/N): ",
+                path.file_name().unwrap().to_str().unwrap());
+            io::stdout().flush()?;
+
+            let mut response = String::new();
+            io::stdin().read_line(&mut response)?;
+
+            // Re-enable raw mode
+            terminal::enable_raw_mode()?;
+            execute!(io::stdout(), cursor::Hide)?;
+
+            if response.trim().to_lowercase() == "y" {
+                let was_dir = path.is_dir();
+                if was_dir {
+                    fs::remove_dir_all(&path)?;
+                } else {
+                    fs::remove_file(&path)?;
+                }
+
+                self.undo_stack.push(UndoAction::Delete {
+                    path: path.clone(),
+                    was_dir
+                });
+                self.redo_stack.clear();
+                self.load_entries()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self) -> io::Result<()> {
+        if let Some(action) = self.undo_stack.pop() {
+            match action.clone() {
+                UndoAction::Copy { dest, .. } => {
+                    // Undo copy: delete the destination
+                    if dest.is_dir() {
+                        fs::remove_dir_all(&dest)?;
+                    } else {
+                        fs::remove_file(&dest)?;
+                    }
+                }
+                UndoAction::Move { .. } => {
+                    // Can't easily undo trash - would need to restore from trash
+                }
+                UndoAction::Delete { .. } => {
+                    // Can't undo permanent delete
+                }
+            }
+            self.redo_stack.push(action);
+            self.load_entries()?;
+        }
+        Ok(())
+    }
+
+    fn redo(&mut self) -> io::Result<()> {
+        if let Some(action) = self.redo_stack.pop() {
+            match action.clone() {
+                UndoAction::Copy { src, dest } => {
+                    // Redo copy
+                    if src.is_dir() {
+                        self.copy_dir_recursive(&src, &dest)?;
+                    } else {
+                        fs::copy(&src, &dest)?;
+                    }
+                }
+                UndoAction::Move { .. } => {
+                    // Can't redo trash
+                }
+                UndoAction::Delete { .. } => {
+                    // Can't redo delete
+                }
+            }
+            self.undo_stack.push(action);
+            self.load_entries()?;
+        }
+        Ok(())
     }
 }
 
@@ -1326,7 +1801,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                             browser.fuzzy_prev_count = 0;
                             return Ok(ExitAction::None);
                         }
-                        KeyCode::Char(ch) if browser.keybindings.contains(&browser.keybindings.open_in_finder, ch) => {
+                        KeyCode::Char(ch) if browser.keybindings.contains(&browser.keybindings.quit_then_open_in_finder, ch) => {
                             // Open current directory in Finder and exit
                             browser.fuzzy_mode = false;
                             browser.fuzzy_query.clear();
@@ -1455,7 +1930,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                     if browser.keybindings.contains(&browser.keybindings.quit, ch) {
                         return Ok(ExitAction::None);
                     }
-                    if browser.keybindings.contains(&browser.keybindings.open_in_finder, ch) {
+                    if browser.keybindings.contains(&browser.keybindings.quit_then_open_in_finder, ch) {
                         // Open current directory in Finder and exit
                         return Ok(ExitAction::OpenInFinder(browser.get_current_dir().clone()));
                     }
@@ -1487,6 +1962,14 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         browser.go_home()?;
                         continue;
                     }
+                    if browser.keybindings.contains(&browser.keybindings.next_sibling, ch) {
+                        browser.go_to_next_sibling()?;
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.prev_sibling, ch) {
+                        browser.go_to_prev_sibling()?;
+                        continue;
+                    }
                     if browser.keybindings.contains(&browser.keybindings.preview_toggle, ch) {
                         browser.preview_mode = !browser.preview_mode;
                         continue;
@@ -1496,6 +1979,67 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         browser.load_entries()?;
                         browser.update_layout()?;
                         let _ = browser.save_show_hidden();
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.toggle_mode, ch) {
+                        browser.list_mode = !browser.list_mode;
+                        browser.update_layout()?;
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.copy, ch) {
+                        browser.copy_to_clipboard();
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.paste, ch) {
+                        browser.paste_from_clipboard()?;
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.trash, ch) {
+                        browser.move_to_trash()?;
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.delete, ch) {
+                        browser.delete_permanent()?;
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.undo, ch) {
+                        browser.undo()?;
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.redo, ch) {
+                        browser.redo()?;
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.rename, ch) {
+                        // Rename functionality
+                        if let Some(selected_path) = browser.get_selected_path() {
+                            if let Some(old_name) = selected_path.file_name().and_then(|n| n.to_str()) {
+                                // Disable raw mode temporarily
+                                terminal::disable_raw_mode()?;
+                                execute!(io::stdout(), cursor::Show)?;
+
+                                print!("\nRename '{}' to: ", old_name);
+                                io::stdout().flush()?;
+
+                                let mut new_name = String::new();
+                                io::stdin().read_line(&mut new_name)?;
+                                let new_name = new_name.trim();
+
+                                if !new_name.is_empty() && new_name != old_name {
+                                    let new_path = selected_path.parent().unwrap().join(new_name);
+                                    if let Err(e) = fs::rename(&selected_path, &new_path) {
+                                        eprintln!("Error renaming: {}", e);
+                                        std::thread::sleep(std::time::Duration::from_secs(2));
+                                    } else {
+                                        browser.load_entries()?;
+                                    }
+                                }
+
+                                // Re-enable raw mode
+                                terminal::enable_raw_mode()?;
+                                execute!(io::stdout(), cursor::Hide)?;
+                            }
+                        }
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.fuzzy_find, ch) {
@@ -1582,7 +2126,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                     KeyCode::Down => browser.select_down(),
                     KeyCode::Left => browser.select_left(),
                     KeyCode::Right => browser.select_right(),
-                    KeyCode::Enter => {
+                    KeyCode::Enter | KeyCode::Char('k') => {
                         // Enter: Select item - if file, open in editor; if directory, cd to it
                         if let Some(selected_path) = browser.get_selected_path() {
                             if selected_path.is_file() {
