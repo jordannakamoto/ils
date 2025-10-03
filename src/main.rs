@@ -130,6 +130,9 @@ struct Keybindings {
     preview_height_increase: Vec<char>,
     toggle_hidden: Vec<char>,
     fuzzy_find: Vec<char>,
+    fuzzy_back: Vec<char>,
+    fuzzy_home: Vec<char>,
+    open_in_finder: Vec<char>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -178,6 +181,8 @@ struct Settings {
     exit_after_edit: bool,
     #[serde(default = "default_preview_scroll_amount")]
     preview_scroll_amount: usize,
+    #[serde(default = "default_show_hidden")]
+    show_hidden: bool,
 }
 
 fn default_exit_after_edit() -> bool {
@@ -188,11 +193,16 @@ fn default_preview_scroll_amount() -> usize {
     10
 }
 
+fn default_show_hidden() -> bool {
+    false
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             exit_after_edit: default_exit_after_edit(),
             preview_scroll_amount: default_preview_scroll_amount(),
+            show_hidden: default_show_hidden(),
         }
     }
 }
@@ -266,6 +276,13 @@ preview_height_increase = ['+', '=']
 toggle_hidden = ['.']          # Toggle hidden files
 fuzzy_find = ['/']             # Enter fuzzy find mode
 
+# Fuzzy find mode controls
+fuzzy_back = ['/']             # Go back one directory (in fuzzy mode)
+fuzzy_home = ['?']             # Go to home directory (in fuzzy mode)
+
+# Special
+open_in_finder = ['Q']         # Open current directory in Finder (Shift+q)
+
 # ============================================================================
 # COLORS
 # ============================================================================
@@ -274,7 +291,7 @@ fuzzy_find = ['/']             # Enter fuzzy find mode
 #   - Named colors: "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"
 #   - Dark variants: "darkgrey", "darkred", etc.
 #   - Hex colors: "#RRGGBB" (e.g., "#333333")
-#   - Special: "reverse" (inverted colors), "none" (no color)
+#   - Special: "reverse" (inverted default color), "none" (no color)
 
 # Path bar at top
 path_fg = "white"
@@ -300,6 +317,9 @@ exit_after_edit = false
 # Number of lines to scroll in preview mode (default: 10)
 # Shift+i/o will scroll by visible lines instead
 preview_scroll_amount = 10
+
+# Show hidden files by default (default: false)
+show_hidden = false
 "##;
 
             fs::write(&config_path, default_config)?;
@@ -469,6 +489,9 @@ impl Default for Keybindings {
             preview_height_increase: vec!['+', '='],
             toggle_hidden: vec!['.'],
             fuzzy_find: vec!['/'],
+            fuzzy_back: vec!['/'],
+            fuzzy_home: vec!['?'],
+            open_in_finder: vec!['Q'],
         }
     }
 }
@@ -569,7 +592,7 @@ impl FileBrowser {
             preview_scroll_map: HashMap::new(),
             preview_split_ratio,
             show_help,
-            show_hidden: false,
+            show_hidden: settings.show_hidden,
             fuzzy_mode: false,
             fuzzy_query: String::new(),
             fuzzy_prev_count: 0,
@@ -622,6 +645,20 @@ impl FileBrowser {
             fs::create_dir_all(&config_dir)?;
             let config_path = config_dir.join("preview_ratio");
             fs::write(config_path, self.preview_split_ratio.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn save_show_hidden(&self) -> io::Result<()> {
+        if let Some(config_path) = Config::path() {
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                if let Ok(mut config) = toml::from_str::<Config>(&content) {
+                    config.settings.show_hidden = self.show_hidden;
+                    if let Ok(new_content) = toml::to_string_pretty(&config) {
+                        fs::write(&config_path, new_content)?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1013,20 +1050,31 @@ impl FileBrowser {
             "",
             "NAVIGATION:",
             "  wasd / ↑↓←→        -  Move cursor",
-            "  l / Enter          -  Open directory",
+            "  l / Enter          -  Open directory/file",
             "  j / b / Backspace  -  Go back",
             "  h                  -  Go home",
-            "  Space              -  Select (open file in $EDITOR or cd to dir)",
+            "  .                  -  Toggle hidden files",
             "",
-            "PREVIEW & COMMANDS:",
+            "FUZZY FIND:",
+            "  /                  -  Enter fuzzy find mode",
+            "  Type to search     -  Auto-navigate on unique match",
+            "  Enter              -  Open selected item (in find mode)",
+            "  /                  -  Go back (in find mode)",
+            "  ?                  -  Go home (in find mode)",
+            "  Esc                -  Exit find mode",
+            "",
+            "EXIT:",
+            "  Esc                -  Exit and cd to current directory",
+            "  q                  -  Quit without cd",
+            "  Shift+q            -  Open current directory in Finder",
+            "",
+            "PREVIEW:",
             "  p                  -  Toggle preview",
-            "  i / o              -  Scroll preview up/down (10 lines)",
+            "  i / o              -  Scroll preview up/down",
             "  Shift+I / Shift+O  -  Scroll preview faster",
             "  - / +              -  Decrease/increase preview height",
-            "  .                  -  Toggle hidden files",
-            "  ?                  -  Toggle this help",
-            "  q / Esc            -  Quit",
             "",
+            "  ?                  -  Toggle this help",
             "",
             "Press any key to continue...",
         ];
@@ -1278,22 +1326,22 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                             browser.fuzzy_prev_count = 0;
                             return Ok(ExitAction::None);
                         }
-                        KeyCode::Char('Q') => {
-                            // Shift+Q: open current directory in Finder and exit
+                        KeyCode::Char(ch) if browser.keybindings.contains(&browser.keybindings.open_in_finder, ch) => {
+                            // Open current directory in Finder and exit
                             browser.fuzzy_mode = false;
                             browser.fuzzy_query.clear();
                             browser.fuzzy_prev_count = 0;
                             return Ok(ExitAction::OpenInFinder(browser.get_current_dir().clone()));
                         }
-                        KeyCode::Char('/') => {
+                        KeyCode::Char(ch) if browser.keybindings.contains(&browser.keybindings.fuzzy_back, ch) => {
                             // Go back up a directory but stay in fuzzy mode
                             browser.fuzzy_query.clear();
                             browser.go_back()?;
                             browser.fuzzy_prev_count = browser.entries.len();
                             continue;
                         }
-                        KeyCode::Char('?') => {
-                            // Shift+/ (which produces '?') - go home but stay in fuzzy mode
+                        KeyCode::Char(ch) if browser.keybindings.contains(&browser.keybindings.fuzzy_home, ch) => {
+                            // Go home but stay in fuzzy mode
                             browser.fuzzy_query.clear();
                             browser.go_home()?;
                             browser.fuzzy_prev_count = browser.entries.len();
@@ -1407,8 +1455,8 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                     if browser.keybindings.contains(&browser.keybindings.quit, ch) {
                         return Ok(ExitAction::None);
                     }
-                    if ch == 'Q' {
-                        // Shift+Q: open current directory in Finder and exit
+                    if browser.keybindings.contains(&browser.keybindings.open_in_finder, ch) {
+                        // Open current directory in Finder and exit
                         return Ok(ExitAction::OpenInFinder(browser.get_current_dir().clone()));
                     }
                     if browser.keybindings.contains(&browser.keybindings.up, ch) {
@@ -1447,6 +1495,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         browser.show_hidden = !browser.show_hidden;
                         browser.load_entries()?;
                         browser.update_layout()?;
+                        let _ = browser.save_show_hidden();
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.fuzzy_find, ch) {
