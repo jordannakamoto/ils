@@ -2340,6 +2340,132 @@ impl FileBrowser {
     }
 }
 
+fn show_welcome_pages() -> io::Result<()> {
+    use crossterm::event::{self, Event, KeyCode};
+
+    // Page 1: Welcome & General Info
+    println!("\n{}", "=".repeat(60));
+    println!("  Welcome to ils - Interactive ls");
+    println!("{}", "=".repeat(60));
+    println!("\nA fast, keyboard-driven file browser for the terminal.\n");
+    println!("Features:");
+    println!("  • Fuzzy find navigation");
+    println!("  • File preview with syntax highlighting");
+    println!("  • Image and PDF preview");
+    println!("  • Permission editing, file operations, and more");
+    println!("\nPress any key to continue...");
+
+    terminal::enable_raw_mode()?;
+    loop {
+        if let Event::Key(_) = event::read()? {
+            break;
+        }
+    }
+    terminal::disable_raw_mode()?;
+
+    // Page 2: Shell Integration Setup
+    execute!(io::stdout(), terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    println!("\n{}", "=".repeat(60));
+    println!("  Shell Integration Setup");
+    println!("{}", "=".repeat(60));
+    println!("\nTo navigate directories, ils needs a shell wrapper function.");
+    println!("This allows 'cd' to work when you exit the browser.\n");
+
+    // Detect shell
+    let shell = env::var("SHELL").unwrap_or_default();
+    let rc_file = if shell.contains("zsh") {
+        Some(format!("{}/.zshrc", env::var("HOME").unwrap_or_default()))
+    } else if shell.contains("bash") {
+        Some(format!("{}/.bashrc", env::var("HOME").unwrap_or_default()))
+    } else {
+        None
+    };
+
+    if let Some(ref rc_path) = rc_file {
+        println!("Add shell integration to {}? (y/N): ", rc_path);
+        let mut response = String::new();
+        io::stdin().read_line(&mut response)?;
+
+        if response.trim().to_lowercase() == "y" {
+            let shell_function = r#"
+# ils - Interactive ls
+ils() {
+    ils-bin "$@"
+    if [ -f /tmp/ils_cd ]; then
+        local target=$(cat /tmp/ils_cd)
+        rm /tmp/ils_cd
+        if [ -d "$target" ]; then
+            cd "$target"
+        else
+            echo "$target"
+        fi
+    fi
+}
+"#;
+            use std::fs::OpenOptions;
+            use std::io::Write;
+
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&rc_path)?;
+
+            file.write_all(shell_function.as_bytes())?;
+            println!("\n✓ Shell integration added to {}", rc_path);
+            println!("Run 'source {}' or restart your terminal.\n", rc_path);
+        } else {
+            println!("\nSkipped. Run 'ils --init' later to see the shell function.\n");
+        }
+    } else {
+        println!("Could not detect shell. Run 'ils --init' to see the shell function.\n");
+    }
+
+    println!("Press any key to continue...");
+    terminal::enable_raw_mode()?;
+    loop {
+        if let Event::Key(_) = event::read()? {
+            break;
+        }
+    }
+    terminal::disable_raw_mode()?;
+
+    // Page 3: Quick Start / Help
+    execute!(io::stdout(), terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    println!("\n{}", "=".repeat(60));
+    println!("  Quick Start Guide");
+    println!("{}", "=".repeat(60));
+    println!("\nBasic Navigation:");
+    println!("  w/s/a/d or arrows  -  Navigate");
+    println!("  Enter or l         -  Open file/directory");
+    println!("  j or b             -  Go back");
+    println!("  h                  -  Go home");
+    println!("\nFuzzy Find:");
+    println!("  /                  -  Jump mode (auto-exit)");
+    println!("  Shift+/ or ?       -  Stay mode (keep searching)");
+    println!("\nOther:");
+    println!("  p                  -  Toggle preview");
+    println!("  m                  -  Toggle list mode");
+    println!("  Space              -  Toggle file info / line numbers");
+    println!("  !                  -  Help menu");
+    println!("  Esc                -  Quit without cd");
+    println!("  q                  -  Exit and cd to directory");
+    println!("\nPress any key to start...");
+
+    terminal::enable_raw_mode()?;
+    loop {
+        if let Event::Key(_) = event::read()? {
+            break;
+        }
+    }
+    terminal::disable_raw_mode()?;
+
+    // Create default config
+    Config::create_default()?;
+    execute!(io::stdout(), terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
@@ -2393,6 +2519,12 @@ ils() {{
 }}
 "#);
         return Ok(());
+    }
+
+    // Check for first run and show welcome pages
+    let first_run = Config::path().map(|p| !p.exists()).unwrap_or(true);
+    if first_run {
+        show_welcome_pages()?;
     }
 
     let start_dir = env::current_dir()?;
