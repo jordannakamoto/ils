@@ -1,8 +1,8 @@
 class Ils < Formula
   desc "Interactive ls - A fast, keyboard-driven file browser for the terminal"
   homepage "https://github.com/jordannakamoto/ils"
-  url "https://github.com/jordannakamoto/ils/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "f4641869a4dc914bb4edae2105e704a7f108d23c88b8273203d626d12e65c0c9"
+  url "https://github.com/jordannakamoto/ils/archive/refs/tags/v0.1.1.tar.gz"
+  sha256 "e91a48c11c6ab7241758ea249fc30c476d2d738079ab44dd5d94ac6240dfde53"
   license "MIT"
 
   depends_on "rust" => :build

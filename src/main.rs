@@ -263,6 +263,8 @@ struct Settings {
     show_tilde_for_home: bool,
     #[serde(default = "default_verbose_dates")]
     verbose_dates: bool,
+    #[serde(default = "default_debug_show_welcome")]
+    debug_show_welcome: bool,
 }
 
 fn default_exit_after_edit() -> bool {
@@ -293,6 +295,10 @@ fn default_verbose_dates() -> bool {
     false
 }
 
+fn default_debug_show_welcome() -> bool {
+    false
+}
+
 fn default_preview_split_ratio() -> f32 {
     0.5
 }
@@ -318,6 +324,7 @@ impl Default for Settings {
             jump_amount: default_jump_amount(),
             show_tilde_for_home: default_show_tilde_for_home(),
             verbose_dates: default_verbose_dates(),
+            debug_show_welcome: default_debug_show_welcome(),
         }
     }
 }
@@ -2523,7 +2530,19 @@ ils() {{
 
     // Check for first run and show welcome pages
     let first_run = Config::path().map(|p| !p.exists()).unwrap_or(true);
-    if first_run {
+
+    // Load config to check debug_show_welcome setting
+    let (config, _) = if let Some(config_path) = Config::path() {
+        if config_path.exists() {
+            Config::load()
+        } else {
+            (Config::default(), None)
+        }
+    } else {
+        (Config::default(), None)
+    };
+
+    if first_run || config.settings.debug_show_welcome {
         show_welcome_pages()?;
     }
 
