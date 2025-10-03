@@ -9,12 +9,12 @@
 #   - Special: "reverse" (inverted colors), "none" (no color)
 
 # Path bar
-path_fg = "reverse"
-path_bg = "none"
+path_fg = "white"
+path_bg = "#333333"
 
 # Selected item
-selected_fg = "black"
-selected_bg = "cyan"
+selected_fg = "none"
+selected_bg = "none"
 
 # Directory names
 directory_fg = "cyan"

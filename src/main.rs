@@ -121,7 +121,6 @@ struct Keybindings {
     open: Vec<char>,
     back: Vec<char>,
     home: Vec<char>,
-    select: Vec<char>,
     quit: Vec<char>,
     help: Vec<char>,
     preview_toggle: Vec<char>,
@@ -130,6 +129,7 @@ struct Keybindings {
     preview_height_decrease: Vec<char>,
     preview_height_increase: Vec<char>,
     toggle_hidden: Vec<char>,
+    fuzzy_find: Vec<char>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -149,19 +149,19 @@ struct ColorConfig {
 }
 
 fn default_path_fg() -> String {
-    "reverse".to_string()
+    "white".to_string()
 }
 
 fn default_path_bg() -> String {
-    "none".to_string()
+    "#333333".to_string()
 }
 
 fn default_selected_fg() -> String {
-    "black".to_string()
+    "none".to_string()
 }
 
 fn default_selected_bg() -> String {
-    "cyan".to_string()
+    "none".to_string()
 }
 
 fn default_directory_fg() -> String {
@@ -176,16 +176,23 @@ fn default_preview_border_fg() -> String {
 struct Settings {
     #[serde(default = "default_exit_after_edit")]
     exit_after_edit: bool,
+    #[serde(default = "default_preview_scroll_amount")]
+    preview_scroll_amount: usize,
 }
 
 fn default_exit_after_edit() -> bool {
     false
 }
 
+fn default_preview_scroll_amount() -> usize {
+    10
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             exit_after_edit: default_exit_after_edit(),
+            preview_scroll_amount: default_preview_scroll_amount(),
         }
     }
 }
@@ -344,7 +351,6 @@ impl Default for Keybindings {
             open: vec!['l'],
             back: vec!['j', 'b'],
             home: vec!['h'],
-            select: vec![' '],
             quit: vec!['q'],
             help: vec!['?'],
             preview_toggle: vec!['p'],
@@ -353,6 +359,7 @@ impl Default for Keybindings {
             preview_height_decrease: vec!['-', '_'],
             preview_height_increase: vec!['+', '='],
             toggle_hidden: vec!['.'],
+            fuzzy_find: vec!['/'],
         }
     }
 }
@@ -402,6 +409,9 @@ struct FileBrowser {
     preview_split_ratio: f32, // Ratio of screen for preview (0.0-1.0)
     show_help: bool, // Whether to show help screen
     show_hidden: bool, // Whether to show hidden files
+    fuzzy_mode: bool, // Whether fuzzy find mode is active
+    fuzzy_query: String, // Current fuzzy search query
+    fuzzy_prev_count: usize, // Previous match count for fuzzy finder
     keybindings: Keybindings,
     color_config: ColorConfig,
     settings: Settings,
@@ -456,6 +466,9 @@ impl FileBrowser {
             preview_split_ratio,
             show_help,
             show_hidden: false,
+            fuzzy_mode: false,
+            fuzzy_query: String::new(),
+            fuzzy_prev_count: 0,
             keybindings,
             color_config,
             settings,
@@ -713,12 +726,28 @@ impl FileBrowser {
                     }
 
                     let prefix = if is_selected { "> " } else { "  " };
-                    let full_cell = format!("{}{:<width$}", prefix, display_name, width = NAME_WIDTH);
+
+                    // Check if this entry matches the fuzzy query
+                    let query_len = if self.fuzzy_mode && !self.fuzzy_query.is_empty() {
+                        let query_lower = self.fuzzy_query.to_lowercase();
+                        if name.to_lowercase().starts_with(&query_lower) {
+                            self.fuzzy_query.len().min(display_name.len())
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+
+                    // Print prefix
+                    queue!(stdout, Print(prefix))?;
 
                     if is_selected {
                         // Apply selected colors
                         if let Some(fg) = self.color_config.parse_selected_fg() {
                             queue!(stdout, SetForegroundColor(fg))?;
+                        } else {
+                            queue!(stdout, SetForegroundColor(Color::Green))?;
                         }
                         if let Some(bg) = self.color_config.parse_selected_bg() {
                             queue!(stdout, crossterm::style::SetBackgroundColor(bg))?;
@@ -734,7 +763,44 @@ impl FileBrowser {
                         queue!(stdout, ResetColor)?;
                     }
 
-                    queue!(stdout, Print(&full_cell))?;
+                    // Print name with fuzzy match highlighting
+                    if query_len > 0 {
+                        // Print matching part in bright yellow with bold and dark background
+                        queue!(stdout, crossterm::style::SetAttribute(crossterm::style::Attribute::Bold))?;
+                        queue!(stdout, SetForegroundColor(Color::Rgb { r: 255, g: 255, b: 0 }))?;
+                        queue!(stdout, crossterm::style::SetBackgroundColor(Color::Rgb { r: 50, g: 50, b: 50 }))?;
+                        queue!(stdout, Print(&display_name[..query_len]))?;
+                        queue!(stdout, crossterm::style::SetAttribute(crossterm::style::Attribute::Reset))?;
+
+                        // Reset to original color for rest
+                        if is_selected {
+                            if let Some(fg) = self.color_config.parse_selected_fg() {
+                                queue!(stdout, SetForegroundColor(fg))?;
+                            } else {
+                                queue!(stdout, SetForegroundColor(Color::Green))?;
+                            }
+                            if let Some(bg) = self.color_config.parse_selected_bg() {
+                                queue!(stdout, crossterm::style::SetBackgroundColor(bg))?;
+                            }
+                        } else if is_dir {
+                            if let Some(fg) = self.color_config.parse_directory_fg() {
+                                queue!(stdout, SetForegroundColor(fg))?;
+                            } else {
+                                queue!(stdout, SetForegroundColor(Color::Blue))?;
+                            }
+                        } else {
+                            queue!(stdout, ResetColor)?;
+                        }
+
+                        // Print rest of name, padded
+                        let rest = &display_name[query_len..];
+                        let padding = NAME_WIDTH - display_name.len();
+                        queue!(stdout, Print(format!("{}{}", rest, " ".repeat(padding))))?;
+                    } else {
+                        // No match, print normally with padding
+                        queue!(stdout, Print(format!("{:<width$}", display_name, width = NAME_WIDTH)))?;
+                    }
+
                     queue!(stdout, ResetColor)?;
                 }
                 queue!(stdout, Print("\r\n"))?;
@@ -814,6 +880,18 @@ impl FileBrowser {
             }
         }
 
+        // 5. Draw fuzzy search bar if in fuzzy mode
+        if self.fuzzy_mode {
+            queue!(stdout, cursor::MoveTo(0, height.saturating_sub(1)))?;
+            queue!(
+                stdout,
+                ResetColor,
+                SetForegroundColor(Color::Yellow),
+                Print(format!("Find: {}_", self.fuzzy_query)),
+                ResetColor
+            )?;
+        }
+
         // Flush all queued commands simultaneously to minimize flicker
         stdout.flush()?;
         Ok(())
@@ -888,6 +966,31 @@ impl FileBrowser {
         if self.selected + 1 < self.entries.len() && (self.selected + 1) % self.num_cols != 0 {
             self.selected += 1;
         }
+    }
+
+    fn fuzzy_match(&self) -> (Option<usize>, usize) {
+        // Find all entries that match the fuzzy query and return (first_match, count)
+        if self.fuzzy_query.is_empty() {
+            return (None, 0);
+        }
+
+        let query_lower = self.fuzzy_query.to_lowercase();
+
+        let matches: Vec<usize> = self.entries.iter().enumerate()
+            .filter_map(|(idx, entry)| {
+                if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
+                    if name.to_lowercase().starts_with(&query_lower) {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        (matches.first().copied(), matches.len())
     }
 
     fn open_selected(&mut self) -> io::Result<bool> {
@@ -988,13 +1091,18 @@ ils() {{
     terminal::disable_raw_mode()?;
 
     match result {
-        Ok(Some(final_path)) => {
-            // Path was selected (either a file via Enter/f, or the current directory via 'd').
+        Ok(ExitAction::Cd(final_path)) => {
             // Write to temp file for the shell wrapper to read.
             let _ = fs::write("/tmp/ils_cd", final_path.display().to_string());
         }
-        Ok(None) => {
-            // Quit without action (q/Esc)
+        Ok(ExitAction::OpenInFinder(final_path)) => {
+            // Open directory in Finder
+            let _ = std::process::Command::new("open")
+                .arg(&final_path)
+                .spawn();
+        }
+        Ok(ExitAction::None) => {
+            // Quit without action (q)
         }
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -1010,7 +1118,13 @@ ils() {{
     Ok(())
 }
 
-fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
+enum ExitAction {
+    None,
+    Cd(PathBuf),
+    OpenInFinder(PathBuf),
+}
+
+fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
     loop {
         browser.draw()?;
 
@@ -1022,6 +1136,143 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                     continue;
                 }
 
+                // Handle fuzzy find mode
+                if browser.fuzzy_mode {
+                    match code {
+                        KeyCode::Esc => {
+                            // Esc: exit fuzzy mode (don't exit the app)
+                            browser.fuzzy_mode = false;
+                            browser.fuzzy_query.clear();
+                            browser.fuzzy_prev_count = 0;
+                            continue;
+                        }
+                        KeyCode::Char('q') => {
+                            // q: quit without cd
+                            browser.fuzzy_mode = false;
+                            browser.fuzzy_query.clear();
+                            browser.fuzzy_prev_count = 0;
+                            return Ok(ExitAction::None);
+                        }
+                        KeyCode::Char('Q') => {
+                            // Shift+Q: open current directory in Finder and exit
+                            browser.fuzzy_mode = false;
+                            browser.fuzzy_query.clear();
+                            browser.fuzzy_prev_count = 0;
+                            return Ok(ExitAction::OpenInFinder(browser.get_current_dir().clone()));
+                        }
+                        KeyCode::Char('/') => {
+                            // Go back up a directory but stay in fuzzy mode
+                            browser.fuzzy_query.clear();
+                            browser.go_back()?;
+                            browser.fuzzy_prev_count = browser.entries.len();
+                            continue;
+                        }
+                        KeyCode::Char('?') => {
+                            // Shift+/ (which produces '?') - go home but stay in fuzzy mode
+                            browser.fuzzy_query.clear();
+                            browser.go_home()?;
+                            browser.fuzzy_prev_count = browser.entries.len();
+                            continue;
+                        }
+                        KeyCode::Backspace => {
+                            browser.fuzzy_query.pop();
+                            let (match_idx, count) = browser.fuzzy_match();
+                            // Only update selection if there's exactly one match
+                            if count == 1 {
+                                if let Some(idx) = match_idx {
+                                    browser.selected = idx;
+                                }
+                            }
+                            browser.fuzzy_prev_count = count;
+                            continue;
+                        }
+                        KeyCode::Enter => {
+                            // Enter: Same behavior as normal mode - open file in editor or cd to directory
+                            browser.fuzzy_query.clear();
+                            browser.fuzzy_prev_count = 0;
+                            browser.fuzzy_mode = false;
+
+                            if let Some(selected_path) = browser.get_selected_path() {
+                                if selected_path.is_file() {
+                                    // Write current directory to temp file for shell wrapper
+                                    let _ = fs::write("/tmp/ils_cd", browser.get_current_dir().display().to_string());
+
+                                    // Disable raw mode and open in default editor
+                                    terminal::disable_raw_mode()?;
+                                    execute!(io::stdout(), cursor::Show)?;
+
+                                    let editor = env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+                                    let _ = std::process::Command::new(editor)
+                                        .arg(&selected_path)
+                                        .status();
+
+                                    // Check if we should exit after editing
+                                    if browser.settings.exit_after_edit {
+                                        return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
+                                    }
+
+                                    // Re-enable raw mode
+                                    execute!(io::stdout(), cursor::Hide)?;
+                                    terminal::enable_raw_mode()?;
+                                } else {
+                                    // It's a directory, exit with it
+                                    return Ok(ExitAction::Cd(selected_path));
+                                }
+                            } else {
+                                // No selection, return current directory
+                                return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
+                            }
+                            continue;
+                        }
+                        KeyCode::Up => {
+                            browser.select_up();
+                            continue;
+                        }
+                        KeyCode::Down => {
+                            browser.select_down();
+                            continue;
+                        }
+                        KeyCode::Left => {
+                            browser.select_left();
+                            continue;
+                        }
+                        KeyCode::Right => {
+                            browser.select_right();
+                            continue;
+                        }
+                        KeyCode::Char(ch) => {
+                            browser.fuzzy_query.push(ch);
+                            let (match_idx, count) = browser.fuzzy_match();
+                            // Only update selection if there's exactly one match
+                            if count == 1 {
+                                if let Some(idx) = match_idx {
+                                    browser.selected = idx;
+                                }
+                                // Auto-open if we narrowed down to 1 match
+                                if browser.fuzzy_prev_count > 1 || browser.fuzzy_prev_count == 1 {
+                                    browser.fuzzy_query.clear();
+                                    browser.open_selected()?;
+                                    // Stay in fuzzy mode and reset count to new directory's entry count
+                                    browser.fuzzy_prev_count = browser.entries.len();
+                                    // Drain any pending keyboard events to prevent accidental typing
+                                    thread::sleep(Duration::from_millis(200));
+                                    while event::poll(Duration::from_millis(0))? {
+                                        if let Event::Key(_) = event::read()? {
+                                            // Discard buffered key events
+                                        }
+                                    }
+                                } else {
+                                    browser.fuzzy_prev_count = count;
+                                }
+                            } else {
+                                browser.fuzzy_prev_count = count;
+                            }
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+
                 // Check character-based bindings first
                 if let KeyCode::Char(ch) = code {
                     if browser.keybindings.contains(&browser.keybindings.help, ch) {
@@ -1029,7 +1280,11 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.quit, ch) {
-                        return Ok(None);
+                        return Ok(ExitAction::None);
+                    }
+                    if ch == 'Q' {
+                        // Shift+Q: open current directory in Finder and exit
+                        return Ok(ExitAction::OpenInFinder(browser.get_current_dir().clone()));
                     }
                     if browser.keybindings.contains(&browser.keybindings.up, ch) {
                         browser.select_up();
@@ -1051,40 +1306,6 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                         browser.open_selected()?;
                         continue;
                     }
-                    if browser.keybindings.contains(&browser.keybindings.select, ch) {
-                        // Select item - if file, open in editor; if directory, cd to it
-                        if let Some(selected_path) = browser.get_selected_path() {
-                            if selected_path.is_file() {
-                                // Write current directory to temp file for shell wrapper
-                                let _ = fs::write("/tmp/ils_cd", browser.get_current_dir().display().to_string());
-
-                                // Disable raw mode and open in default editor
-                                terminal::disable_raw_mode()?;
-                                execute!(io::stdout(), cursor::Show)?;
-
-                                let editor = env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
-                                let _ = std::process::Command::new(editor)
-                                    .arg(&selected_path)
-                                    .status();
-
-                                // Check if we should exit after editing
-                                if browser.settings.exit_after_edit {
-                                    return Ok(Some(browser.get_current_dir().clone()));
-                                }
-
-                                // Re-enable raw mode
-                                execute!(io::stdout(), cursor::Hide)?;
-                                terminal::enable_raw_mode()?;
-                            } else {
-                                // It's a directory, exit with it
-                                return Ok(Some(selected_path));
-                            }
-                        } else {
-                            // No selection, return current directory
-                            return Ok(Some(browser.get_current_dir().clone()));
-                        }
-                        continue;
-                    }
                     if browser.keybindings.contains(&browser.keybindings.back, ch) {
                         browser.go_back()?;
                         continue;
@@ -1103,6 +1324,12 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                         browser.update_layout()?;
                         continue;
                     }
+                    if browser.keybindings.contains(&browser.keybindings.fuzzy_find, ch) {
+                        browser.fuzzy_mode = true;
+                        browser.fuzzy_query.clear();
+                        browser.fuzzy_prev_count = browser.entries.len();
+                        continue;
+                    }
                     if browser.keybindings.contains(&browser.keybindings.preview_height_decrease, ch) {
                         if browser.preview_mode {
                             browser.preview_split_ratio = (browser.preview_split_ratio - 0.1).max(0.2);
@@ -1118,7 +1345,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.preview_up, ch) || ch == 'I' {
-                        // Scroll preview up - shift for visible lines (uppercase), otherwise 10 lines
+                        // Scroll preview up - shift for visible lines (uppercase), otherwise configured amount
                         if browser.preview_mode {
                             if let Some(selected) = browser.get_selected_path() {
                                 let (_, height) = terminal::size()?;
@@ -1128,7 +1355,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                                 let scroll_amount = if ch == 'I' || modifiers.contains(KeyModifiers::SHIFT) {
                                     preview_lines
                                 } else {
-                                    10
+                                    browser.settings.preview_scroll_amount
                                 };
 
                                 let current = browser.preview_scroll_map.get(&selected).copied().unwrap_or(0);
@@ -1139,7 +1366,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.preview_down, ch) || ch == 'O' {
-                        // Scroll preview down - shift for visible lines (uppercase), otherwise 10 lines
+                        // Scroll preview down - shift for visible lines (uppercase), otherwise configured amount
                         if browser.preview_mode {
                             if let Some(selected) = browser.get_selected_path() {
                                 if selected.is_file() {
@@ -1150,7 +1377,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
                                     let scroll_amount = if ch == 'O' || modifiers.contains(KeyModifiers::SHIFT) {
                                         preview_lines
                                     } else {
-                                        10
+                                        browser.settings.preview_scroll_amount
                                     };
 
                                     // Get file line count to bound scroll
@@ -1173,12 +1400,47 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<Option<PathBuf>> {
 
                 // Handle arrow keys and special keys
                 match code {
-                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Esc => {
+                        // Esc: cd to current directory and exit
+                        return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
+                    }
                     KeyCode::Up => browser.select_up(),
                     KeyCode::Down => browser.select_down(),
                     KeyCode::Left => browser.select_left(),
                     KeyCode::Right => browser.select_right(),
-                    KeyCode::Enter => { browser.open_selected()?; }
+                    KeyCode::Enter => {
+                        // Enter: Select item - if file, open in editor; if directory, cd to it
+                        if let Some(selected_path) = browser.get_selected_path() {
+                            if selected_path.is_file() {
+                                // Write current directory to temp file for shell wrapper
+                                let _ = fs::write("/tmp/ils_cd", browser.get_current_dir().display().to_string());
+
+                                // Disable raw mode and open in default editor
+                                terminal::disable_raw_mode()?;
+                                execute!(io::stdout(), cursor::Show)?;
+
+                                let editor = env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+                                let _ = std::process::Command::new(editor)
+                                    .arg(&selected_path)
+                                    .status();
+
+                                // Check if we should exit after editing
+                                if browser.settings.exit_after_edit {
+                                    return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
+                                }
+
+                                // Re-enable raw mode
+                                execute!(io::stdout(), cursor::Hide)?;
+                                terminal::enable_raw_mode()?;
+                            } else {
+                                // It's a directory, exit with it
+                                return Ok(ExitAction::Cd(selected_path));
+                            }
+                        } else {
+                            // No selection, return current directory
+                            return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
+                        }
+                    }
                     KeyCode::Backspace => { browser.go_back()?; }
                     _ => {}
                 }
