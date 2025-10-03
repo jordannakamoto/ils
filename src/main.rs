@@ -459,6 +459,9 @@ cursor_bg = "none"
 fuzzy_highlight_fg = "#ffff00"
 fuzzy_highlight_bg = "#323232"
 
+# Line numbers in preview
+line_number_fg = "darkgrey"
+
 # ============================================================================
 # SETTINGS
 # ============================================================================
@@ -484,6 +487,18 @@ case_sensitive_search = false
 
 # Show trailing slash on directories (default: true)
 show_dir_slash = true
+
+# Jump amount for W/A/S/D navigation (default: 5)
+jump_amount = 5
+
+# Show ~ for home directory in path (default: true)
+show_tilde_for_home = true
+
+# Always show relative dates (default: false, uses "Aug '25" format for dates >3mo)
+verbose_dates = false
+
+# Debug: Force show welcome wizard on every run (default: false)
+debug_show_welcome = false
 "##;
 
             fs::write(&config_path, default_config)?;
