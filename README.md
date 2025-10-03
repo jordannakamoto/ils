@@ -4,6 +4,8 @@ Interactive file browser for the terminal.
 
 https://github.com/user-attachments/assets/715f8df6-77b7-42a5-8ebf-9776ef61292f
 
+https://github.com/user-attachments/assets/8a786437-1488-42c8-8c97-7261a87b1c14
+
 
 
 ## Features
