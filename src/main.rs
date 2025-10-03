@@ -729,8 +729,8 @@ struct FileBrowser {
     color_config: ColorConfig,
     settings: Settings,
     preview_cache: HashMap<PathBuf, Vec<String>>, // Cache preview content
-    syntax_set: SyntaxSet,
-    theme_set: ThemeSet,
+    syntax_set: Option<SyntaxSet>,  // Lazy-loaded on first preview
+    theme_set: Option<ThemeSet>,    // Lazy-loaded on first preview
 }
 
 impl FileBrowser {
@@ -785,8 +785,8 @@ impl FileBrowser {
             color_config,
             settings,
             preview_cache: HashMap::new(),
-            syntax_set: SyntaxSet::load_defaults_newlines(),
-            theme_set: ThemeSet::load_defaults(),
+            syntax_set: None,  // Lazy-loaded
+            theme_set: None,   // Lazy-loaded
         };
         browser.load_entries()?;
         browser.update_layout()?; // Initial layout calculation
@@ -797,6 +797,13 @@ impl FileBrowser {
         }
 
         Ok(browser)
+    }
+
+    fn ensure_syntax_loaded(&mut self) {
+        if self.syntax_set.is_none() {
+            self.syntax_set = Some(SyntaxSet::load_defaults_newlines());
+            self.theme_set = Some(ThemeSet::load_defaults());
+        }
     }
 
     fn config_exists() -> bool {
@@ -1195,14 +1202,17 @@ impl FileBrowser {
                         let reader = io::BufReader::new(file);
                         let scroll_pos = self.preview_scroll_map.get(&selected).copied().unwrap_or(0);
 
+                        // Lazy-load syntax highlighting on first use
+                        self.ensure_syntax_loaded();
+
                         // Try to detect syntax
-                        let syntax = self.syntax_set
+                        let syntax = self.syntax_set.as_ref().unwrap()
                             .find_syntax_for_file(&selected)
                             .ok()
                             .flatten()
-                            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+                            .unwrap_or_else(|| self.syntax_set.as_ref().unwrap().find_syntax_plain_text());
 
-                        let theme = &self.theme_set.themes["base16-ocean.dark"];
+                        let theme = &self.theme_set.as_ref().unwrap().themes["base16-ocean.dark"];
                         let mut highlighter = HighlightLines::new(syntax, theme);
 
                         // Only read the lines we need
@@ -1217,7 +1227,7 @@ impl FileBrowser {
                             queue!(stdout, cursor::MoveTo(0, split_line + 1 + i as u16))?;
 
                             // Highlight the line
-                            let ranges = highlighter.highlight_line(line, &self.syntax_set).unwrap_or_default();
+                            let ranges = highlighter.highlight_line(line, self.syntax_set.as_ref().unwrap()).unwrap_or_default();
                             let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
 
                             queue!(stdout, Print(escaped), ResetColor)?;
