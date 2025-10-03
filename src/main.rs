@@ -197,19 +197,128 @@ impl Default for Settings {
     }
 }
 
-impl Settings {
+// Unified config structure
+#[derive(Serialize, Deserialize, Clone)]
+struct Config {
+    #[serde(default)]
+    keybindings: Keybindings,
+    #[serde(default)]
+    colors: ColorConfig,
+    #[serde(default)]
+    settings: Settings,
+}
+
+impl Config {
     fn load() -> Self {
         if let Ok(home) = env::var("HOME") {
-            let config_path = PathBuf::from(home).join(".config/ils/settings.toml");
+            let config_path = PathBuf::from(home).join(".config/ils/config.toml");
             if let Ok(content) = fs::read_to_string(&config_path) {
                 if let Ok(config) = toml::from_str(&content) {
                     return config;
                 }
             }
         }
-        Self::default()
+        Config::default()
     }
 
+    fn path() -> Option<PathBuf> {
+        if let Ok(home) = env::var("HOME") {
+            Some(PathBuf::from(home).join(".config/ils/config.toml"))
+        } else {
+            None
+        }
+    }
+
+    fn create_default() -> io::Result<()> {
+        if let Some(config_path) = Config::path() {
+            if let Some(parent) = config_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            let default_config = r##"# ILS Configuration File
+# This file contains all configuration for the ils file browser
+
+# ============================================================================
+# KEYBINDINGS
+# ============================================================================
+[keybindings]
+# Navigation
+up = ['w']
+down = ['s']
+left = ['a']
+right = ['d']
+
+# Actions
+open = ['l']                    # Open file/directory
+back = ['j', 'b']              # Go back up one directory
+home = ['h']                    # Go to home directory
+quit = ['q']                    # Quit without cd
+help = ['?']                    # Show help screen
+
+# Preview controls
+preview_toggle = ['p']          # Toggle preview pane
+preview_up = ['i']             # Scroll preview up
+preview_down = ['o']           # Scroll preview down
+preview_height_decrease = ['-', '_']
+preview_height_increase = ['+', '=']
+
+# Other
+toggle_hidden = ['.']          # Toggle hidden files
+fuzzy_find = ['/']             # Enter fuzzy find mode
+
+# ============================================================================
+# COLORS
+# ============================================================================
+[colors]
+# Color values can be:
+#   - Named colors: "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"
+#   - Dark variants: "darkgrey", "darkred", etc.
+#   - Hex colors: "#RRGGBB" (e.g., "#333333")
+#   - Special: "reverse" (inverted colors), "none" (no color)
+
+# Path bar at top
+path_fg = "white"
+path_bg = "#333333"
+
+# Selected item
+selected_fg = "none"
+selected_bg = "none"
+
+# Directory names
+directory_fg = "cyan"
+
+# Preview pane border
+preview_border_fg = "darkgrey"
+
+# ============================================================================
+# SETTINGS
+# ============================================================================
+[settings]
+# Exit after editing a file (default: false)
+exit_after_edit = false
+
+# Number of lines to scroll in preview mode (default: 10)
+# Shift+i/o will scroll by visible lines instead
+preview_scroll_amount = 10
+"##;
+
+            fs::write(&config_path, default_config)?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            keybindings: Keybindings::default(),
+            colors: ColorConfig::default(),
+            settings: Settings::default(),
+        }
+    }
+}
+
+impl Settings {
     fn save(&self) -> io::Result<()> {
         if let Ok(home) = env::var("HOME") {
             let config_dir = PathBuf::from(home).join(".config/ils");
@@ -427,29 +536,24 @@ impl FileBrowser {
         // Load saved preview split ratio
         let preview_split_ratio = Self::load_preview_ratio().unwrap_or(0.5);
 
+        // Load unified config or create default if not exists
+        let config = if let Some(config_path) = Config::path() {
+            if config_path.exists() {
+                Config::load()
+            } else {
+                let _ = Config::create_default();
+                Config::default()
+            }
+        } else {
+            Config::default()
+        };
+
         // Check if this is first run (show help if no config exists)
-        let show_help = !Self::config_exists();
+        let show_help = Config::path().map(|p| !p.exists()).unwrap_or(true);
 
-        // Load keybindings or create defaults if not exists
-        let keybindings = if Self::config_exists() {
-            Keybindings::load()
-        } else {
-            let defaults = Keybindings::default();
-            let _ = defaults.save();
-            defaults
-        };
-
-        // Load color config or create defaults if not exists
-        let color_config = if Self::color_config_exists() {
-            ColorConfig::load()
-        } else {
-            let defaults = ColorConfig::default();
-            let _ = defaults.save();
-            defaults
-        };
-
-        // Load settings
-        let settings = Settings::load();
+        let keybindings = config.keybindings;
+        let color_config = config.colors;
+        let settings = config.settings;
 
         // start drawing content on the row *after* the initial position
         let mut browser = FileBrowser {
@@ -1053,6 +1157,27 @@ fn main() -> io::Result<()> {
     // Check for --install flag
     if args.len() > 1 && args[1] == "--install" {
         return install();
+    }
+
+    // Check for config command
+    if args.len() > 1 && args[1] == "config" {
+        // Create default config if it doesn't exist
+        if let Some(config_path) = Config::path() {
+            if !config_path.exists() {
+                Config::create_default()?;
+            }
+
+            // Open config in editor
+            let editor = env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+            let status = std::process::Command::new(editor)
+                .arg(&config_path)
+                .status()?;
+
+            if status.success() {
+                println!("Config saved to: {}", config_path.display());
+            }
+        }
+        return Ok(());
     }
 
     // Check for --init flag (legacy)
