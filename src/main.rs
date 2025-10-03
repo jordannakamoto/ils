@@ -143,6 +143,7 @@ struct Keybindings {
     delete: Vec<char>,
     undo: Vec<char>,
     redo: Vec<char>,
+    create: Vec<char>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -376,6 +377,7 @@ trash = ['x']                  # Move to trash
 delete = ['X']                 # Permanently delete (Shift+x)
 undo = ['z']                   # Undo last action
 redo = ['Z']                   # Redo last undone action (Shift+z)
+create = ['y']                 # Create new file or directory
 
 # ============================================================================
 # COLORS
@@ -656,6 +658,7 @@ impl Default for Keybindings {
             delete: vec!['X'],
             undo: vec!['z'],
             redo: vec!['Z'],
+            create: vec!['y'],
         }
     }
 }
@@ -697,6 +700,8 @@ enum UndoAction {
     Copy { src: PathBuf, dest: PathBuf },
     Move { src: PathBuf, dest: PathBuf },
     Delete { path: PathBuf, was_dir: bool },
+    Rename { old_path: PathBuf, new_path: PathBuf },
+    Create { path: PathBuf, was_dir: bool },
 }
 
 struct FileBrowser {
@@ -1280,11 +1285,12 @@ impl FileBrowser {
             "",
             "FILE OPERATIONS:",
             "  r                  -  Rename selected file",
+            "  y                  -  Create file/dir (end with / for dir)",
             "  c                  -  Copy to clipboard",
             "  v                  -  Paste from clipboard",
             "  x                  -  Move to trash",
             "  Shift+x            -  Permanently delete (with warning)",
-            "  z                  -  Undo last action",
+            "  z                  -  Undo (copy/rename/create)",
             "  Shift+z            -  Redo",
             "",
             "FUZZY FIND:",
@@ -1572,11 +1578,7 @@ impl FileBrowser {
                 .output()?;
 
             if output.status.success() {
-                self.undo_stack.push(UndoAction::Move {
-                    src: path.clone(),
-                    dest: PathBuf::from("~/.Trash").join(path.file_name().unwrap())
-                });
-                self.redo_stack.clear();
+                // Don't add to undo stack - can't reliably restore from trash
                 self.load_entries()?;
             }
         }
@@ -1608,11 +1610,7 @@ impl FileBrowser {
                     fs::remove_file(&path)?;
                 }
 
-                self.undo_stack.push(UndoAction::Delete {
-                    path: path.clone(),
-                    was_dir
-                });
-                self.redo_stack.clear();
+                // Don't add to undo stack - can't restore deleted files
                 self.load_entries()?;
             }
         }
@@ -1621,23 +1619,38 @@ impl FileBrowser {
 
     fn undo(&mut self) -> io::Result<()> {
         if let Some(action) = self.undo_stack.pop() {
-            match action.clone() {
+            match &action {
                 UndoAction::Copy { dest, .. } => {
                     // Undo copy: delete the destination
                     if dest.is_dir() {
-                        fs::remove_dir_all(&dest)?;
+                        fs::remove_dir_all(dest)?;
                     } else {
-                        fs::remove_file(&dest)?;
+                        fs::remove_file(dest)?;
+                    }
+                    self.redo_stack.push(action);
+                }
+                UndoAction::Rename { old_path, new_path } => {
+                    // Undo rename: rename back to old name
+                    if new_path.exists() {
+                        fs::rename(new_path, old_path)?;
+                        self.redo_stack.push(action);
                     }
                 }
-                UndoAction::Move { .. } => {
-                    // Can't easily undo trash - would need to restore from trash
+                UndoAction::Create { path, was_dir } => {
+                    // Undo create: delete the created file/directory
+                    if path.exists() {
+                        if *was_dir {
+                            fs::remove_dir_all(path)?;
+                        } else {
+                            fs::remove_file(path)?;
+                        }
+                        self.redo_stack.push(action);
+                    }
                 }
-                UndoAction::Delete { .. } => {
-                    // Can't undo permanent delete
+                UndoAction::Move { .. } | UndoAction::Delete { .. } => {
+                    // These shouldn't be in the stack, but if they are, ignore them
                 }
             }
-            self.redo_stack.push(action);
             self.load_entries()?;
         }
         Ok(())
@@ -1645,25 +1658,83 @@ impl FileBrowser {
 
     fn redo(&mut self) -> io::Result<()> {
         if let Some(action) = self.redo_stack.pop() {
-            match action.clone() {
+            match &action {
                 UndoAction::Copy { src, dest } => {
                     // Redo copy
                     if src.is_dir() {
-                        self.copy_dir_recursive(&src, &dest)?;
+                        self.copy_dir_recursive(src, dest)?;
                     } else {
-                        fs::copy(&src, &dest)?;
+                        fs::copy(src, dest)?;
+                    }
+                    self.undo_stack.push(action);
+                }
+                UndoAction::Rename { old_path, new_path } => {
+                    // Redo rename: rename to new name
+                    if old_path.exists() {
+                        fs::rename(old_path, new_path)?;
+                        self.undo_stack.push(action);
                     }
                 }
-                UndoAction::Move { .. } => {
-                    // Can't redo trash
+                UndoAction::Create { path, was_dir } => {
+                    // Redo create: recreate the file/directory
+                    if *was_dir {
+                        fs::create_dir_all(path)?;
+                    } else {
+                        if let Some(parent) = path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::File::create(path)?;
+                    }
+                    self.undo_stack.push(action);
                 }
-                UndoAction::Delete { .. } => {
-                    // Can't redo delete
+                UndoAction::Move { .. } | UndoAction::Delete { .. } => {
+                    // These shouldn't be in the stack, but if they are, ignore them
                 }
             }
-            self.undo_stack.push(action);
             self.load_entries()?;
         }
+        Ok(())
+    }
+
+    fn create_new(&mut self) -> io::Result<()> {
+        // Disable raw mode to get input
+        terminal::disable_raw_mode()?;
+        execute!(io::stdout(), cursor::Show)?;
+
+        print!("\nCreate (end with / for directory): ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        // Re-enable raw mode
+        terminal::enable_raw_mode()?;
+        execute!(io::stdout(), cursor::Hide)?;
+
+        if !input.is_empty() {
+            let path = self.current_dir.join(input);
+            let is_dir = input.ends_with('/');
+
+            if is_dir {
+                // Create directory
+                fs::create_dir_all(&path)?;
+            } else {
+                // Create file (touch)
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::File::create(&path)?;
+            }
+
+            self.undo_stack.push(UndoAction::Create {
+                path: path.clone(),
+                was_dir: is_dir
+            });
+            self.redo_stack.clear();
+            self.load_entries()?;
+        }
+
         Ok(())
     }
 }
@@ -2010,6 +2081,10 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         browser.redo()?;
                         continue;
                     }
+                    if browser.keybindings.contains(&browser.keybindings.create, ch) {
+                        browser.create_new()?;
+                        continue;
+                    }
                     if browser.keybindings.contains(&browser.keybindings.rename, ch) {
                         // Rename functionality
                         if let Some(selected_path) = browser.get_selected_path() {
@@ -2031,6 +2106,11 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                                         eprintln!("Error renaming: {}", e);
                                         std::thread::sleep(std::time::Duration::from_secs(2));
                                     } else {
+                                        browser.undo_stack.push(UndoAction::Rename {
+                                            old_path: selected_path.clone(),
+                                            new_path: new_path.clone()
+                                        });
+                                        browser.redo_stack.clear();
                                         browser.load_entries()?;
                                     }
                                 }

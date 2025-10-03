@@ -1,8 +1,0 @@
-# Interactive ls (ils) - Settings Configuration
-# Edit this file to customize behavior
-# After editing, copy to ~/.config/ils/settings.toml
-
-# Exit to current directory after editing a file (default: false)
-# When true, pressing Space on a file will open it in $EDITOR and then exit
-# When false, you'll return to the browser after editing
-exit_after_edit = false
