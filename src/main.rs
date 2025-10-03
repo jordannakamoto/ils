@@ -13,6 +13,7 @@ use std::{
     path::PathBuf,
     thread,
     time::Duration,
+    sync::{Arc, Mutex},
 };
 use syntect::{
     easy::HighlightLines,
@@ -20,6 +21,8 @@ use syntect::{
     parsing::SyntaxSet,
     util::as_24_bit_terminal_escaped,
 };
+use viuer::{Config as ViuerConfig, print_from_file};
+use pdf_extract::extract_text;
 use serde::{Deserialize, Serialize};
 
 fn install() -> io::Result<()> {
@@ -144,6 +147,10 @@ struct Keybindings {
     undo: Vec<char>,
     redo: Vec<char>,
     create: Vec<char>,
+    jump_up: Vec<char>,
+    jump_down: Vec<char>,
+    jump_left: Vec<char>,
+    jump_right: Vec<char>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -174,6 +181,8 @@ struct ColorConfig {
     fuzzy_highlight_fg: String,
     #[serde(default = "default_fuzzy_highlight_bg")]
     fuzzy_highlight_bg: String,
+    #[serde(default = "default_line_number_fg")]
+    line_number_fg: String,
 }
 
 fn default_path_fg() -> String {
@@ -228,6 +237,10 @@ fn default_fuzzy_highlight_bg() -> String {
     "#323232".to_string()
 }
 
+fn default_line_number_fg() -> String {
+    "darkgrey".to_string()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct Settings {
     #[serde(default = "default_exit_after_edit")]
@@ -244,10 +257,20 @@ struct Settings {
     case_sensitive_search: bool,
     #[serde(default = "default_show_dir_slash")]
     show_dir_slash: bool,
+    #[serde(default = "default_jump_amount")]
+    jump_amount: usize,
+    #[serde(default = "default_show_tilde_for_home")]
+    show_tilde_for_home: bool,
+    #[serde(default = "default_verbose_dates")]
+    verbose_dates: bool,
 }
 
 fn default_exit_after_edit() -> bool {
     false
+}
+
+fn default_jump_amount() -> usize {
+    5
 }
 
 fn default_preview_scroll_amount() -> usize {
@@ -259,6 +282,14 @@ fn default_show_hidden() -> bool {
 }
 
 fn default_preview_on_start() -> bool {
+    false
+}
+
+fn default_show_tilde_for_home() -> bool {
+    true
+}
+
+fn default_verbose_dates() -> bool {
     false
 }
 
@@ -284,6 +315,9 @@ impl Default for Settings {
             preview_split_ratio: default_preview_split_ratio(),
             case_sensitive_search: default_case_sensitive_search(),
             show_dir_slash: default_show_dir_slash(),
+            jump_amount: default_jump_amount(),
+            show_tilde_for_home: default_show_tilde_for_home(),
+            verbose_dates: default_verbose_dates(),
         }
     }
 }
@@ -300,20 +334,22 @@ struct Config {
 }
 
 impl Config {
-    fn load() -> Self {
+    fn load() -> (Self, Option<String>) {
         if let Ok(home) = env::var("HOME") {
             let config_path = PathBuf::from(home).join(".config/ils/config.toml");
             if let Ok(content) = fs::read_to_string(&config_path) {
                 match toml::from_str(&content) {
-                    Ok(config) => return config,
+                    Ok(config) => return (config, None),
                     Err(e) => {
+                        let error_msg = format!("Config error: {} - Using defaults. Press '?' for help.", e);
                         eprintln!("\x1b[31mError loading config from {}: {}\x1b[0m", config_path.display(), e);
                         eprintln!("\x1b[33mUsing default configuration. Run 'ils config' to fix.\x1b[0m");
+                        return (Config::default(), Some(error_msg));
                     }
                 }
             }
         }
-        Config::default()
+        (Config::default(), None)
     }
 
     fn path() -> Option<PathBuf> {
@@ -490,6 +526,7 @@ impl Default for ColorConfig {
             cursor_bg: default_cursor_bg(),
             fuzzy_highlight_fg: default_fuzzy_highlight_fg(),
             fuzzy_highlight_bg: default_fuzzy_highlight_bg(),
+            line_number_fg: default_line_number_fg(),
         }
     }
 }
@@ -570,6 +607,10 @@ impl ColorConfig {
 
     fn parse_fuzzy_highlight_bg(&self) -> Option<Color> {
         Self::parse_color_string(&self.fuzzy_highlight_bg)
+    }
+
+    fn parse_line_number_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.line_number_fg)
     }
 
     fn parse_color_string(color_str: &str) -> Option<Color> {
@@ -659,6 +700,10 @@ impl Default for Keybindings {
             undo: vec!['z'],
             redo: vec!['Z'],
             create: vec!['y'],
+            jump_up: vec!['W'],
+            jump_down: vec!['S'],
+            jump_left: vec!['A'],
+            jump_right: vec!['D'],
         }
     }
 }
@@ -704,6 +749,14 @@ enum UndoAction {
     Create { path: PathBuf, was_dir: bool },
 }
 
+#[derive(Clone)]
+enum PreviewState {
+    NotLoaded,
+    Loading,
+    Loaded(Vec<String>),
+    Error(String),
+}
+
 struct FileBrowser {
     current_dir: PathBuf,
     entries: Vec<PathBuf>,
@@ -721,32 +774,56 @@ struct FileBrowser {
     fuzzy_mode: bool, // Whether fuzzy find mode is active
     fuzzy_query: String, // Current fuzzy search query
     fuzzy_prev_count: usize, // Previous match count for fuzzy finder
+    fuzzy_jump_mode: bool, // Whether fuzzy mode should auto-exit on selection
     list_mode: bool, // Whether to show in list mode (vs grid mode)
+    list_info_mode: u8, // 0 = none, 1 = modified date, 2 = permissions, 3 = size
+    show_line_numbers: bool, // Whether to show line numbers in preview
     clipboard: Option<PathBuf>, // Copied file/directory path
     undo_stack: Vec<UndoAction>, // Undo history
     redo_stack: Vec<UndoAction>, // Redo history
     keybindings: Keybindings,
     color_config: ColorConfig,
     settings: Settings,
-    preview_cache: HashMap<PathBuf, Vec<String>>, // Cache preview content
+    preview_cache: Arc<Mutex<HashMap<PathBuf, PreviewState>>>, // Cache preview content with loading state
     syntax_set: Option<SyntaxSet>,  // Lazy-loaded on first preview
     theme_set: Option<ThemeSet>,    // Lazy-loaded on first preview
+    config_error: Option<String>,   // Config loading error message
+    dir_size_cache: HashMap<PathBuf, u64>, // Cache directory sizes
+    calculating_sizes: bool, // Whether we're currently calculating sizes
+    show_created_date: bool, // Toggle between modified and created date
+    error_message: Option<String>, // Error message to display
 }
 
 impl FileBrowser {
+    fn format_path_display(&self) -> String {
+        if self.settings.show_tilde_for_home {
+            if let Some(home) = env::var("HOME").ok() {
+                let home_path = PathBuf::from(home);
+                if let Ok(relative) = self.current_dir.strip_prefix(&home_path) {
+                    if relative.as_os_str().is_empty() {
+                        return "~".to_string();
+                    } else {
+                        return format!("~/{}", relative.display());
+                    }
+                }
+            }
+        }
+        self.current_dir.display().to_string()
+    }
+
     fn new(start_dir: PathBuf) -> io::Result<Self> {
         let (_, row) = cursor::position()?;
 
         // Load unified config or create default if not exists
-        let config = if let Some(config_path) = Config::path() {
+        let (config, config_error) = if let Some(config_path) = Config::path() {
             if config_path.exists() {
                 Config::load()
             } else {
                 let _ = Config::create_default();
-                Config::default()
+                (Config::default(), None)
             }
         } else {
-            Config::default()
+            (Config::default(), None)
         };
 
         // Check if this is first run (show help if no config exists)
@@ -777,24 +854,27 @@ impl FileBrowser {
             fuzzy_mode: false,
             fuzzy_query: String::new(),
             fuzzy_prev_count: 0,
+            fuzzy_jump_mode: false,
             list_mode: false,
+            list_info_mode: 0,
+            show_line_numbers: true,
             clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             keybindings,
             color_config,
             settings,
-            preview_cache: HashMap::new(),
+            preview_cache: Arc::new(Mutex::new(HashMap::new())),
             syntax_set: None,  // Lazy-loaded
             theme_set: None,   // Lazy-loaded
+            config_error,
+            dir_size_cache: HashMap::new(),
+            calculating_sizes: false,
+            show_created_date: false,
+            error_message: None,
         };
         browser.load_entries()?;
-        browser.update_layout()?; // Initial layout calculation
-
-        // Mark that config exists now
-        if show_help {
-            let _ = browser.save_preview_ratio();
-        }
+        // Don't calculate layout here - will be done on first draw for faster startup
 
         Ok(browser)
     }
@@ -804,6 +884,67 @@ impl FileBrowser {
             self.syntax_set = Some(SyntaxSet::load_defaults_newlines());
             self.theme_set = Some(ThemeSet::load_defaults());
         }
+    }
+
+    fn calculate_dir_size(dir: &PathBuf) -> u64 {
+        let mut total = 0u64;
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        total += metadata.len();
+                    } else if metadata.is_dir() {
+                        total += Self::calculate_dir_size(&entry.path());
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    fn calculate_all_dir_sizes(&mut self) -> io::Result<()> {
+        self.calculating_sizes = true;
+        for entry in &self.entries {
+            if entry.is_dir() && !self.dir_size_cache.contains_key(entry) {
+                let size = Self::calculate_dir_size(entry);
+                self.dir_size_cache.insert(entry.clone(), size);
+            }
+        }
+        self.calculating_sizes = false;
+        Ok(())
+    }
+
+    fn start_preview_load(&self, path: PathBuf) {
+        let cache = Arc::clone(&self.preview_cache);
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+        // Mark as loading
+        if let Ok(mut cache_lock) = cache.lock() {
+            cache_lock.insert(path.clone(), PreviewState::Loading);
+        }
+
+        thread::spawn(move || {
+            let result = if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp") {
+                // For images, we can't really cache rendered output easily
+                // Just mark as loaded with placeholder
+                PreviewState::Loaded(vec!["[Image Preview]".to_string()])
+            } else if extension == "pdf" {
+                // Extract PDF text
+                match extract_text(&path) {
+                    Ok(text) => {
+                        let lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+                        PreviewState::Loaded(lines)
+                    }
+                    Err(_) => PreviewState::Error("Cannot extract PDF text".to_string())
+                }
+            } else {
+                PreviewState::NotLoaded
+            };
+
+            if let Ok(mut cache_lock) = cache.lock() {
+                cache_lock.insert(path, result);
+            }
+        });
     }
 
     fn config_exists() -> bool {
@@ -955,6 +1096,9 @@ impl FileBrowser {
 
         let (width, height) = terminal::size()?;
 
+        // Ensure layout is calculated (deferred from new() for faster startup)
+        self.update_layout()?;
+
         // Show help screen if requested
         if self.show_help {
             self.draw_help(&mut stdout, width, height)?;
@@ -980,12 +1124,14 @@ impl FileBrowser {
         let fg_color = self.color_config.parse_fg_color();
         let bg_color = self.color_config.parse_bg_color();
 
+        let display_path = self.format_path_display();
+
         if fg_color.is_none() && bg_color.is_none() {
             // Use reverse attribute (default)
             queue!(
                 stdout,
                 crossterm::style::SetAttribute(crossterm::style::Attribute::Reverse),
-                Print(format!(" {} ", self.current_dir.display())),
+                Print(format!(" {} ", display_path)),
                 crossterm::style::SetAttribute(crossterm::style::Attribute::Reset)
             )?;
         } else {
@@ -996,7 +1142,7 @@ impl FileBrowser {
             if let Some(bg) = bg_color {
                 queue!(stdout, crossterm::style::SetBackgroundColor(bg))?;
             }
-            queue!(stdout, Print(format!(" {} ", self.current_dir.display())))?;
+            queue!(stdout, Print(format!(" {} ", display_path)))?;
             queue!(stdout, ResetColor)?;
         }
 
@@ -1032,9 +1178,14 @@ impl FileBrowser {
             const NAME_WIDTH: usize = 20;
 
             let max_display_rows = (display_height as usize).saturating_sub(self.start_row as usize).saturating_sub(2); // + self.breadcrumbs.len());
-            let num_rows = ((self.entries.len() + self.num_cols - 1) / self.num_cols).min(max_display_rows);
+            let total_rows = (self.entries.len() + self.num_cols - 1) / self.num_cols;
 
-            for row in 0..num_rows {
+            // Use scroll_offset to show the right portion (works for both list and grid mode)
+            let start_row = self.scroll_offset;
+            let end_row = (start_row + max_display_rows).min(total_rows);
+            let num_rows = end_row - start_row;
+
+            for row in start_row..end_row {
                 for col in 0..self.num_cols {
                     let idx = row * self.num_cols + col;
 
@@ -1051,14 +1202,16 @@ impl FileBrowser {
                         .and_then(|n| n.to_str())
                         .unwrap_or("?");
 
-                    // Truncate name if needed (unless in list mode)
+                    // Truncate name if needed
                     let mut display_name = if is_dir && self.show_dir_slash {
                         format!("{}/", name)
                     } else {
                         name.to_string()
                     };
 
-                    if !self.list_mode && display_name.len() > NAME_WIDTH {
+                    // In grid mode or list mode with info, truncate to NAME_WIDTH
+                    // In list mode without info, don't truncate
+                    if (!self.list_mode || (self.list_mode && self.list_info_mode > 0)) && display_name.len() > NAME_WIDTH {
                         display_name.truncate(NAME_WIDTH - 1);
                         display_name.push('~');
                     }
@@ -1130,6 +1283,8 @@ impl FileBrowser {
 
                     // Print name with fuzzy match highlighting
                     if query_len > 0 {
+                        let highlight_len = query_len.min(display_name.len());
+
                         // Print matching part with fuzzy highlight colors
                         queue!(stdout, crossterm::style::SetAttribute(crossterm::style::Attribute::Bold))?;
                         if let Some(fg) = self.color_config.parse_fuzzy_highlight_fg() {
@@ -1142,7 +1297,7 @@ impl FileBrowser {
                         } else {
                             queue!(stdout, crossterm::style::SetBackgroundColor(Color::Rgb { r: 50, g: 50, b: 50 }))?;
                         }
-                        queue!(stdout, Print(&display_name[..query_len]))?;
+                        queue!(stdout, Print(&display_name[..highlight_len]))?;
                         queue!(stdout, crossterm::style::SetAttribute(crossterm::style::Attribute::Reset))?;
 
                         // Reset to original color for rest
@@ -1166,7 +1321,7 @@ impl FileBrowser {
                         }
 
                         // Print rest of name, padded
-                        let rest = &display_name[query_len..];
+                        let rest = &display_name[highlight_len..];
                         let padding = NAME_WIDTH - display_name.len();
                         queue!(stdout, Print(format!("{}{}", rest, " ".repeat(padding))))?;
                     } else {
@@ -1175,8 +1330,146 @@ impl FileBrowser {
                     }
 
                     queue!(stdout, ResetColor)?;
+
+                    // In list mode, show info after the name
+                    if self.list_mode && self.list_info_mode > 0 {
+                        if self.list_info_mode == 1 {
+                            // Show date (modified or created based on toggle)
+                            if let Ok(metadata) = entry.metadata() {
+                                let time_result = if self.show_created_date {
+                                    metadata.created()
+                                } else {
+                                    metadata.modified()
+                                };
+
+                                if let Ok(time) = time_result {
+                                    use std::time::SystemTime;
+                                    if let Ok(elapsed) = SystemTime::now().duration_since(time) {
+                                        let secs = elapsed.as_secs();
+                                        let three_months = 3 * 30 * 24 * 60 * 60; // ~3 months in seconds
+
+                                        let date_str = if self.settings.verbose_dates || secs < three_months {
+                                            // Use relative format
+                                            if secs < 60 {
+                                                format!("{:>9}s", secs)
+                                            } else if secs < 3600 {
+                                                format!("{:>8}min", secs / 60)
+                                            } else if secs < 86400 {
+                                                format!("{:>8}hrs", secs / 3600)
+                                            } else if secs < 2592000 { // 30 days
+                                                format!("{:>7}days", secs / 86400)
+                                            } else if secs < 31536000 { // 365 days
+                                                format!("{:>6}month", secs / 2592000)
+                                            } else {
+                                                format!("{:>7}year", secs / 31536000)
+                                            }
+                                        } else {
+                                            // Use "Aug '25" format for dates > 3 months
+                                            use std::time::UNIX_EPOCH;
+                                            if let Ok(duration) = time.duration_since(UNIX_EPOCH) {
+                                                let timestamp = duration.as_secs() as i64;
+                                                let days_since_epoch = timestamp / 86400;
+                                                let year = 1970 + (days_since_epoch / 365);
+                                                let day_in_year = days_since_epoch % 365;
+                                                let month_idx = (day_in_year / 30).min(11) as usize;
+                                                let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                                                format!("{} '{:02}", months[month_idx], year % 100)
+                                            } else {
+                                                format!("{:>9}s", secs)
+                                            }
+                                        };
+
+                                        queue!(
+                                            stdout,
+                                            SetForegroundColor(Color::DarkGrey),
+                                            Print(format!("  {}", date_str)),
+                                            ResetColor
+                                        )?;
+                                    }
+                                }
+                            }
+                        } else if self.list_info_mode == 2 {
+                            // Show permissions
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                if let Ok(metadata) = entry.metadata() {
+                                    let mode = metadata.permissions().mode();
+                                    let perms = format!(
+                                        "{}{}{}{}{}{}{}{}{}",
+                                        if mode & 0o400 != 0 { 'r' } else { '-' },
+                                        if mode & 0o200 != 0 { 'w' } else { '-' },
+                                        if mode & 0o100 != 0 { 'x' } else { '-' },
+                                        if mode & 0o040 != 0 { 'r' } else { '-' },
+                                        if mode & 0o020 != 0 { 'w' } else { '-' },
+                                        if mode & 0o010 != 0 { 'x' } else { '-' },
+                                        if mode & 0o004 != 0 { 'r' } else { '-' },
+                                        if mode & 0o002 != 0 { 'w' } else { '-' },
+                                        if mode & 0o001 != 0 { 'x' } else { '-' },
+                                    );
+                                    queue!(
+                                        stdout,
+                                        SetForegroundColor(Color::DarkGrey),
+                                        Print(format!("  {}", perms)),
+                                        ResetColor
+                                    )?;
+                                }
+                            }
+                        } else if self.list_info_mode == 3 {
+                            // Show size (with cached dir size)
+                            if let Ok(metadata) = entry.metadata() {
+                                let size = if is_dir {
+                                    // Use cached size or show loading
+                                    if let Some(&dir_size) = self.dir_size_cache.get(entry) {
+                                        if dir_size < 1024 {
+                                            format!("{:>8} B", dir_size)
+                                        } else if dir_size < 1024 * 1024 {
+                                            format!("{:>7.1} K", dir_size as f64 / 1024.0)
+                                        } else if dir_size < 1024 * 1024 * 1024 {
+                                            format!("{:>7.1} M", dir_size as f64 / (1024.0 * 1024.0))
+                                        } else {
+                                            format!("{:>7.1} G", dir_size as f64 / (1024.0 * 1024.0 * 1024.0))
+                                        }
+                                    } else if self.calculating_sizes {
+                                        String::from("  calc...")
+                                    } else {
+                                        String::from("    <DIR>")
+                                    }
+                                } else {
+                                    let len = metadata.len();
+                                    if len < 1024 {
+                                        format!("{:>8} B", len)
+                                    } else if len < 1024 * 1024 {
+                                        format!("{:>7.1} K", len as f64 / 1024.0)
+                                    } else if len < 1024 * 1024 * 1024 {
+                                        format!("{:>7.1} M", len as f64 / (1024.0 * 1024.0))
+                                    } else {
+                                        format!("{:>7.1} G", len as f64 / (1024.0 * 1024.0 * 1024.0))
+                                    }
+                                };
+                                queue!(
+                                    stdout,
+                                    SetForegroundColor(Color::DarkGrey),
+                                    Print(format!("  {}", size)),
+                                    ResetColor
+                                )?;
+                            }
+                        }
+                    }
                 }
                 queue!(stdout, Print("\r\n"))?;
+            }
+
+            // Display config error if present (below the entries)
+            if let Some(error) = &self.config_error {
+                queue!(stdout, cursor::MoveTo(0, start_content_row + num_rows as u16 + 1))?;
+                queue!(
+                    stdout,
+                    SetForegroundColor(Color::Red),
+                    Print(format!("⚠ {}", error)),
+                    ResetColor
+                )?;
             }
         }
 
@@ -1193,48 +1486,221 @@ impl FileBrowser {
 
             // Draw preview
             if let Some(selected) = self.get_selected_path() {
-                if selected.is_file() {
+                if selected.is_dir() {
+                    // Directory preview - show contents and stats
                     let preview_lines = (height - split_line - 3) as usize;
 
-                    // Read only what we need from the file
-                    if let Ok(file) = fs::File::open(&selected) {
-                        use io::BufRead;
-                        let reader = io::BufReader::new(file);
-                        let scroll_pos = self.preview_scroll_map.get(&selected).copied().unwrap_or(0);
+                    if let Ok(entries) = fs::read_dir(&selected) {
+                        let mut dirs = 0;
+                        let mut files = 0;
+                        let mut total_size: u64 = 0;
+                        let mut items: Vec<(String, bool)> = Vec::new();
 
-                        // Lazy-load syntax highlighting on first use
-                        self.ensure_syntax_loaded();
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            let path = entry.path();
+                            let is_dir = path.is_dir();
+                            let name = path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("?")
+                                .to_string();
 
-                        // Try to detect syntax
-                        let syntax = self.syntax_set.as_ref().unwrap()
-                            .find_syntax_for_file(&selected)
-                            .ok()
-                            .flatten()
-                            .unwrap_or_else(|| self.syntax_set.as_ref().unwrap().find_syntax_plain_text());
+                            if is_dir {
+                                dirs += 1;
+                                // Add recursive size for directories
+                                total_size += Self::calculate_dir_size(&path);
+                                items.push((name, true));
+                            } else {
+                                files += 1;
+                                if let Ok(metadata) = entry.metadata() {
+                                    total_size += metadata.len();
+                                }
+                                items.push((name, false));
+                            }
+                        }
 
-                        let theme = &self.theme_set.as_ref().unwrap().themes["base16-ocean.dark"];
-                        let mut highlighter = HighlightLines::new(syntax, theme);
+                        // Sort: directories first, then files
+                        items.sort_by(|a, b| {
+                            if a.1 == b.1 {
+                                a.0.cmp(&b.0)
+                            } else {
+                                b.1.cmp(&a.1)
+                            }
+                        });
 
-                        // Only read the lines we need
-                        let lines_to_display: Vec<String> = reader
-                            .lines()
-                            .skip(scroll_pos)
-                            .take(preview_lines)
-                            .filter_map(|l| l.ok())
-                            .collect();
+                        // Display stats
+                        queue!(stdout, cursor::MoveTo(0, split_line + 1))?;
+                        queue!(
+                            stdout,
+                            SetForegroundColor(Color::Cyan),
+                            Print(format!("[DIR] {} items ({} dirs, {} files)", dirs + files, dirs, files)),
+                            ResetColor
+                        )?;
 
-                        for (i, line) in lines_to_display.iter().enumerate() {
-                            queue!(stdout, cursor::MoveTo(0, split_line + 1 + i as u16))?;
+                        // Display size
+                        let size_str = if total_size < 1024 {
+                            format!("{} B", total_size)
+                        } else if total_size < 1024 * 1024 {
+                            format!("{:.1} KB", total_size as f64 / 1024.0)
+                        } else if total_size < 1024 * 1024 * 1024 {
+                            format!("{:.1} MB", total_size as f64 / (1024.0 * 1024.0))
+                        } else {
+                            format!("{:.1} GB", total_size as f64 / (1024.0 * 1024.0 * 1024.0))
+                        };
 
-                            // Highlight the line
-                            let ranges = highlighter.highlight_line(line, self.syntax_set.as_ref().unwrap()).unwrap_or_default();
-                            let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+                        queue!(stdout, cursor::MoveTo(0, split_line + 2))?;
+                        queue!(
+                            stdout,
+                            SetForegroundColor(Color::DarkGrey),
+                            Print(format!("Size: {}", size_str)),
+                            ResetColor
+                        )?;
 
-                            queue!(stdout, Print(escaped), ResetColor)?;
+                        // Display first few items
+                        for (i, (name, is_dir)) in items.iter().take(preview_lines.saturating_sub(3)).enumerate() {
+                            queue!(stdout, cursor::MoveTo(0, split_line + 4 + i as u16))?;
+                            if *is_dir {
+                                queue!(
+                                    stdout,
+                                    SetForegroundColor(Color::Blue),
+                                    Print(format!("  {}/", name)),
+                                    ResetColor
+                                )?;
+                            } else {
+                                queue!(stdout, Print(format!("  {}", name)))?;
+                            }
+                        }
+                    }
+                } else if selected.is_file() {
+                    let preview_lines = (height - split_line - 3) as usize;
+                    let preview_width = width as u32;
+                    let preview_height = preview_lines as u32;
+
+                    // Check file extension for special handling
+                    let extension = selected.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+                    if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp") {
+                        // Image preview - render directly (can't cache)
+                        // Move cursor to preview area and flush before viuer renders
+                        queue!(stdout, cursor::MoveTo(0, split_line + 1))?;
+                        stdout.flush()?;
+
+                        let conf = ViuerConfig {
+                            transparent: true,
+                            absolute_offset: false,
+                            x: 0,
+                            y: 0,
+                            width: Some(preview_width),
+                            height: Some(preview_height),
+                            ..Default::default()
+                        };
+
+                        if let Err(_) = print_from_file(&selected, &conf) {
+                            queue!(stdout, cursor::MoveTo(0, split_line + 1))?;
+                            queue!(stdout, Print("(cannot preview image)"))?;
+                        }
+                    } else if extension == "pdf" {
+                        // PDF preview - use cache with background loading
+                        let cache_state = if let Ok(cache_lock) = self.preview_cache.lock() {
+                            cache_lock.get(&selected).cloned()
+                        } else {
+                            None
+                        };
+
+                        match cache_state {
+                            Some(PreviewState::Loaded(lines)) => {
+                                let scroll_pos = self.preview_scroll_map.get(&selected).copied().unwrap_or(0);
+                                let display_lines: Vec<&String> = lines.iter()
+                                    .skip(scroll_pos)
+                                    .take(preview_lines)
+                                    .collect();
+
+                                for (i, line) in display_lines.iter().enumerate() {
+                                    queue!(stdout, cursor::MoveTo(0, split_line + 1 + i as u16))?;
+
+                                    if self.show_line_numbers {
+                                        let line_num = scroll_pos + i + 1;
+                                        let line_color = self.color_config.parse_line_number_fg()
+                                            .unwrap_or(Color::DarkGrey);
+                                        queue!(
+                                            stdout,
+                                            SetForegroundColor(line_color),
+                                            Print(format!("{:4} │ ", line_num)),
+                                            ResetColor
+                                        )?;
+                                    }
+
+                                    queue!(stdout, Print(line.as_str()))?;
+                                }
+                            }
+                            Some(PreviewState::Loading) => {
+                                queue!(stdout, cursor::MoveTo(0, split_line + 1))?;
+                                queue!(stdout, Print("Loading PDF..."))?;
+                            }
+                            Some(PreviewState::Error(msg)) => {
+                                queue!(stdout, cursor::MoveTo(0, split_line + 1))?;
+                                queue!(stdout, Print(format!("({})", msg)))?;
+                            }
+                            None | Some(PreviewState::NotLoaded) => {
+                                // Start loading in background
+                                self.start_preview_load(selected.clone());
+                                queue!(stdout, cursor::MoveTo(0, split_line + 1))?;
+                                queue!(stdout, Print("Loading PDF..."))?;
+                            }
                         }
                     } else {
-                        queue!(stdout, cursor::MoveTo(0, split_line + 1))?;
-                        queue!(stdout, Print("(binary file or cannot read)"))?;
+                        // Text file preview with syntax highlighting
+                        if let Ok(file) = fs::File::open(&selected) {
+                            use io::BufRead;
+                            let reader = io::BufReader::new(file);
+                            let scroll_pos = self.preview_scroll_map.get(&selected).copied().unwrap_or(0);
+
+                            // Lazy-load syntax highlighting on first use
+                            self.ensure_syntax_loaded();
+
+                            // Try to detect syntax
+                            let syntax = self.syntax_set.as_ref().unwrap()
+                                .find_syntax_for_file(&selected)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| self.syntax_set.as_ref().unwrap().find_syntax_plain_text());
+
+                            let theme = &self.theme_set.as_ref().unwrap().themes["base16-ocean.dark"];
+                            let mut highlighter = HighlightLines::new(syntax, theme);
+
+                            // Only read the lines we need
+                            let lines_to_display: Vec<String> = reader
+                                .lines()
+                                .skip(scroll_pos)
+                                .take(preview_lines)
+                                .filter_map(|l| l.ok())
+                                .collect();
+
+                            for (i, line) in lines_to_display.iter().enumerate() {
+                                queue!(stdout, cursor::MoveTo(0, split_line + 1 + i as u16))?;
+
+                                // Print line number if enabled
+                                if self.show_line_numbers {
+                                    let line_num = scroll_pos + i + 1;
+                                    let line_color = self.color_config.parse_line_number_fg()
+                                        .unwrap_or(Color::DarkGrey);
+                                    queue!(
+                                        stdout,
+                                        SetForegroundColor(line_color),
+                                        Print(format!("{:4} │ ", line_num)),
+                                        ResetColor
+                                    )?;
+                                }
+
+                                // Highlight the line
+                                let ranges = highlighter.highlight_line(line, self.syntax_set.as_ref().unwrap()).unwrap_or_default();
+                                let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+
+                                queue!(stdout, Print(escaped), ResetColor)?;
+                            }
+                        } else {
+                            queue!(stdout, cursor::MoveTo(0, split_line + 1))?;
+                            queue!(stdout, Print("(binary file or cannot read)"))?;
+                        }
                     }
                 }
             }
@@ -1264,6 +1730,17 @@ impl FileBrowser {
                 ResetColor,
                 SetForegroundColor(Color::Yellow),
                 Print(format!("Find: {}_", self.fuzzy_query)),
+                ResetColor
+            )?;
+        }
+
+        // Display error message if present
+        if let Some(ref error_msg) = self.error_message {
+            queue!(
+                stdout,
+                cursor::MoveTo(0, height - 1),
+                SetForegroundColor(Color::Red),
+                Print(format!(" ERROR: {} ", error_msg)),
                 ResetColor
             )?;
         }
@@ -1312,8 +1789,8 @@ impl FileBrowser {
             "  Esc                -  Exit find mode",
             "",
             "EXIT:",
-            "  Esc                -  Exit and cd to current directory",
-            "  q                  -  Quit without cd",
+            "  Esc                -  Quit without cd",
+            "  q                  -  Exit and cd to current directory",
             "  Shift+q            -  Open current directory in Finder",
             "",
             "PREVIEW:",
@@ -1343,6 +1820,12 @@ impl FileBrowser {
         // Row-major: move up one row (subtract num_cols)
         if self.selected >= self.num_cols {
             self.selected -= self.num_cols;
+
+            // Update scroll if needed (works for both list and grid mode)
+            let current_row = self.selected / self.num_cols;
+            if current_row < self.scroll_offset {
+                self.scroll_offset = current_row;
+            }
         }
     }
 
@@ -1351,6 +1834,15 @@ impl FileBrowser {
         let new_idx = self.selected + self.num_cols;
         if new_idx < self.entries.len() {
             self.selected = new_idx;
+
+            // Update scroll if needed (works for both list and grid mode)
+            if let Ok((_, height)) = terminal::size() {
+                let max_display_rows = (height as usize).saturating_sub(self.start_row as usize).saturating_sub(2);
+                let current_row = self.selected / self.num_cols;
+                if current_row >= self.scroll_offset + max_display_rows {
+                    self.scroll_offset = current_row - max_display_rows + 1;
+                }
+            }
         }
     }
 
@@ -1365,6 +1857,34 @@ impl FileBrowser {
         // Row-major: move right in same row
         if self.selected + 1 < self.entries.len() && (self.selected + 1) % self.num_cols != 0 {
             self.selected += 1;
+        }
+    }
+
+    fn jump_up(&mut self) {
+        // Jump up by configured amount
+        for _ in 0..self.settings.jump_amount {
+            self.select_up();
+        }
+    }
+
+    fn jump_down(&mut self) {
+        // Jump down by configured amount
+        for _ in 0..self.settings.jump_amount {
+            self.select_down();
+        }
+    }
+
+    fn jump_left(&mut self) {
+        // Jump left by configured amount
+        for _ in 0..self.settings.jump_amount {
+            self.select_left();
+        }
+    }
+
+    fn jump_right(&mut self) {
+        // Jump right by configured amount
+        for _ in 0..self.settings.jump_amount {
+            self.select_right();
         }
     }
 
@@ -1403,12 +1923,33 @@ impl FileBrowser {
 
         let selected_path = &self.entries[self.selected];
         if selected_path.is_dir() {
+            // Save the old state before trying to navigate
+            let old_dir = self.current_dir.clone();
+            let old_entries = self.entries.clone();
+            let old_selected = self.selected;
+            let old_scroll = self.scroll_offset;
+
             // Add the selected folder to breadcrumbs before navigating
             if let Some(folder_name) = selected_path.file_name().and_then(|n| n.to_str()) {
                 self.breadcrumbs.push(folder_name.to_string());
             }
             self.current_dir = selected_path.clone();
-            self.load_entries()?;
+
+            // Try to load entries, if it fails, restore previous state
+            if let Err(e) = self.load_entries() {
+                self.current_dir = old_dir;
+                self.entries = old_entries;
+                self.selected = old_selected;
+                self.scroll_offset = old_scroll;
+                self.breadcrumbs.pop();
+
+                // Set error message based on error kind
+                if e.kind() == io::ErrorKind::PermissionDenied {
+                    self.error_message = Some("Permission denied. Grant Full Disk Access to your terminal in System Settings > Privacy & Security.".to_string());
+                } else {
+                    self.error_message = Some(format!("Cannot access: {}", e));
+                }
+            }
             Ok(false)
         } else {
             // For a file, we return true, signaling main to write the path and exit.
@@ -1581,15 +2122,25 @@ impl FileBrowser {
 
     fn move_to_trash(&mut self) -> io::Result<()> {
         if let Some(path) = self.get_selected_path() {
-            // Use macOS trash command
+            let old_selected = self.selected;
+
+            // Use macOS trash command (stderr redirected to suppress sound)
             let output = std::process::Command::new("osascript")
                 .arg("-e")
                 .arg(format!("tell application \"Finder\" to delete POSIX file \"{}\"", path.display()))
+                .stderr(std::process::Stdio::null())
                 .output()?;
 
             if output.status.success() {
                 // Don't add to undo stack - can't reliably restore from trash
                 self.load_entries()?;
+
+                // Keep selection on same index, or previous if at end
+                if old_selected >= self.entries.len() && old_selected > 0 {
+                    self.selected = old_selected - 1;
+                } else if old_selected < self.entries.len() {
+                    self.selected = old_selected;
+                }
             }
         }
         Ok(())
@@ -1597,6 +2148,8 @@ impl FileBrowser {
 
     fn delete_permanent(&mut self) -> io::Result<()> {
         if let Some(path) = self.get_selected_path() {
+            let old_selected = self.selected;
+
             // Disable raw mode to show confirmation
             terminal::disable_raw_mode()?;
             execute!(io::stdout(), cursor::Show)?;
@@ -1622,6 +2175,13 @@ impl FileBrowser {
 
                 // Don't add to undo stack - can't restore deleted files
                 self.load_entries()?;
+
+                // Keep selection on same index, or previous if at end
+                if old_selected >= self.entries.len() && old_selected > 0 {
+                    self.selected = old_selected - 1;
+                } else if old_selected < self.entries.len() {
+                    self.selected = old_selected;
+                }
             }
         }
         Ok(())
@@ -1706,43 +2266,74 @@ impl FileBrowser {
         Ok(())
     }
 
-    fn create_new(&mut self) -> io::Result<()> {
-        // Disable raw mode to get input
-        terminal::disable_raw_mode()?;
+    fn read_input_with_escape(prompt: &str) -> io::Result<Option<String>> {
+        use crossterm::event::{self, Event, KeyCode};
+
         execute!(io::stdout(), cursor::Show)?;
 
-        print!("\nCreate (end with / for directory): ");
+        print!("{}", prompt);
         io::stdout().flush()?;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
-
-        // Re-enable raw mode
-        terminal::enable_raw_mode()?;
-        execute!(io::stdout(), cursor::Hide)?;
-
-        if !input.is_empty() {
-            let path = self.current_dir.join(input);
-            let is_dir = input.ends_with('/');
-
-            if is_dir {
-                // Create directory
-                fs::create_dir_all(&path)?;
-            } else {
-                // Create file (touch)
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
+        loop {
+            if event::poll(std::time::Duration::from_millis(100))? {
+                if let Event::Key(key_event) = event::read()? {
+                    match key_event.code {
+                        KeyCode::Esc => {
+                            println!();
+                            execute!(io::stdout(), cursor::Hide)?;
+                            return Ok(None);
+                        }
+                        KeyCode::Enter => {
+                            println!();
+                            execute!(io::stdout(), cursor::Hide)?;
+                            return Ok(Some(input));
+                        }
+                        KeyCode::Char(c) => {
+                            input.push(c);
+                            print!("{}", c);
+                            io::stdout().flush()?;
+                        }
+                        KeyCode::Backspace => {
+                            if !input.is_empty() {
+                                input.pop();
+                                print!("\x08 \x08");
+                                io::stdout().flush()?;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                fs::File::create(&path)?;
             }
+        }
+    }
 
-            self.undo_stack.push(UndoAction::Create {
-                path: path.clone(),
-                was_dir: is_dir
-            });
-            self.redo_stack.clear();
-            self.load_entries()?;
+    fn create_new(&mut self) -> io::Result<()> {
+        if let Some(input) = Self::read_input_with_escape("\nCreate (end with / for directory): ")? {
+            let input = input.trim();
+
+            if !input.is_empty() {
+                let path = self.current_dir.join(input);
+                let is_dir = input.ends_with('/');
+
+                if is_dir {
+                    // Create directory
+                    fs::create_dir_all(&path)?;
+                } else {
+                    // Create file (touch)
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::File::create(&path)?;
+                }
+
+                self.undo_stack.push(UndoAction::Create {
+                    path: path.clone(),
+                    was_dir: is_dir
+                });
+                self.redo_stack.clear();
+                self.load_entries()?;
+            }
         }
 
         Ok(())
@@ -1859,6 +2450,8 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
 
         match event::read()? {
             Event::Key(KeyEvent { code, modifiers, .. }) => {
+                // Clear error message on any key press
+                browser.error_message = None;
                 // If help is showing, any key dismisses it
                 if browser.show_help {
                     browser.show_help = false;
@@ -1876,11 +2469,11 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                             continue;
                         }
                         KeyCode::Char('q') => {
-                            // q: quit without cd
+                            // q: cd to current directory and exit
                             browser.fuzzy_mode = false;
                             browser.fuzzy_query.clear();
                             browser.fuzzy_prev_count = 0;
-                            return Ok(ExitAction::None);
+                            return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
                         }
                         KeyCode::Char(ch) if browser.keybindings.contains(&browser.keybindings.quit_then_open_in_finder, ch) => {
                             // Open current directory in Finder and exit
@@ -1981,13 +2574,23 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                                 if browser.fuzzy_prev_count > 1 || browser.fuzzy_prev_count == 1 {
                                     browser.fuzzy_query.clear();
                                     browser.open_selected()?;
-                                    // Stay in fuzzy mode and reset count to new directory's entry count
-                                    browser.fuzzy_prev_count = browser.entries.len();
+
+                                    if browser.fuzzy_jump_mode {
+                                        // Exit fuzzy mode after jump
+                                        browser.fuzzy_mode = false;
+                                        browser.fuzzy_prev_count = 0;
+                                    } else {
+                                        // Stay in fuzzy mode and reset count to new directory's entry count
+                                        browser.fuzzy_prev_count = browser.entries.len();
+                                    }
+
                                     // Drain any pending keyboard events to prevent accidental typing
-                                    thread::sleep(Duration::from_millis(200));
-                                    while event::poll(Duration::from_millis(0))? {
-                                        if let Event::Key(_) = event::read()? {
-                                            // Discard buffered key events
+                                    let drain_start = std::time::Instant::now();
+                                    while drain_start.elapsed() < Duration::from_millis(500) {
+                                        if event::poll(Duration::from_millis(50))? {
+                                            if let Event::Key(_) = event::read()? {
+                                                // Discard buffered key events
+                                            }
                                         }
                                     }
                                 } else {
@@ -2004,12 +2607,12 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
 
                 // Check character-based bindings first
                 if let KeyCode::Char(ch) = code {
-                    if browser.keybindings.contains(&browser.keybindings.help, ch) {
+                    if browser.keybindings.contains(&browser.keybindings.help, ch) || ch == '!' {
                         browser.show_help = !browser.show_help;
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.quit, ch) {
-                        return Ok(ExitAction::None);
+                        return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
                     }
                     if browser.keybindings.contains(&browser.keybindings.quit_then_open_in_finder, ch) {
                         // Open current directory in Finder and exit
@@ -2029,6 +2632,22 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                     }
                     if browser.keybindings.contains(&browser.keybindings.right, ch) {
                         browser.select_right();
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.jump_up, ch) {
+                        browser.jump_up();
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.jump_down, ch) {
+                        browser.jump_down();
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.jump_left, ch) {
+                        browser.jump_left();
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.jump_right, ch) {
+                        browser.jump_right();
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.open, ch) {
@@ -2067,6 +2686,46 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         browser.update_layout()?;
                         continue;
                     }
+                    if ch == 'e' && browser.list_mode {
+                        if browser.list_info_mode == 1 {
+                            // Toggle between modified and created date when in date mode
+                            browser.show_created_date = !browser.show_created_date;
+                        } else if browser.list_info_mode == 2 {
+                            // Edit permissions when in permissions mode
+                            if let Some(selected_path) = browser.get_selected_path() {
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    if let Ok(metadata) = selected_path.metadata() {
+                                        let current_mode = metadata.permissions().mode() & 0o777;
+
+                                        if let Ok(Some(input)) = FileBrowser::read_input_with_escape(&format!("\nCurrent permissions: {:o}\nEnter new permissions (octal, e.g., 755): ", current_mode)) {
+                                            if let Ok(new_mode) = u32::from_str_radix(input.trim(), 8) {
+                                                if new_mode <= 0o777 {
+                                                    use std::fs::Permissions;
+                                                    if let Err(e) = fs::set_permissions(&selected_path, Permissions::from_mode(new_mode)) {
+                                                        terminal::disable_raw_mode()?;
+                                                        eprintln!("Error setting permissions: {}", e);
+                                                        std::thread::sleep(std::time::Duration::from_secs(2));
+                                                        terminal::enable_raw_mode()?;
+                                                    }
+                                                }  else {
+                                                    terminal::disable_raw_mode()?;
+                                                    eprintln!("Invalid permissions value");
+                                                    std::thread::sleep(std::time::Duration::from_secs(2));
+                                                    terminal::enable_raw_mode()?;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if browser.list_info_mode == 3 {
+                            // Calculate directory sizes when in size mode
+                            browser.calculate_all_dir_sizes()?;
+                        }
+                        continue;
+                    }
                     if browser.keybindings.contains(&browser.keybindings.copy, ch) {
                         browser.copy_to_clipboard();
                         continue;
@@ -2099,43 +2758,36 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         // Rename functionality
                         if let Some(selected_path) = browser.get_selected_path() {
                             if let Some(old_name) = selected_path.file_name().and_then(|n| n.to_str()) {
-                                // Disable raw mode temporarily
-                                terminal::disable_raw_mode()?;
-                                execute!(io::stdout(), cursor::Show)?;
+                                if let Ok(Some(new_name)) = FileBrowser::read_input_with_escape(&format!("\nRename '{}' to: ", old_name)) {
+                                    let new_name = new_name.trim();
 
-                                print!("\nRename '{}' to: ", old_name);
-                                io::stdout().flush()?;
-
-                                let mut new_name = String::new();
-                                io::stdin().read_line(&mut new_name)?;
-                                let new_name = new_name.trim();
-
-                                if !new_name.is_empty() && new_name != old_name {
-                                    let new_path = selected_path.parent().unwrap().join(new_name);
-                                    if let Err(e) = fs::rename(&selected_path, &new_path) {
-                                        eprintln!("Error renaming: {}", e);
-                                        std::thread::sleep(std::time::Duration::from_secs(2));
-                                    } else {
-                                        browser.undo_stack.push(UndoAction::Rename {
-                                            old_path: selected_path.clone(),
-                                            new_path: new_path.clone()
-                                        });
-                                        browser.redo_stack.clear();
-                                        browser.load_entries()?;
+                                    if !new_name.is_empty() && new_name != old_name {
+                                        let new_path = selected_path.parent().unwrap().join(new_name);
+                                        if let Err(e) = fs::rename(&selected_path, &new_path) {
+                                            terminal::disable_raw_mode()?;
+                                            eprintln!("Error renaming: {}", e);
+                                            std::thread::sleep(std::time::Duration::from_secs(2));
+                                            terminal::enable_raw_mode()?;
+                                        } else {
+                                            browser.undo_stack.push(UndoAction::Rename {
+                                                old_path: selected_path.clone(),
+                                                new_path: new_path.clone()
+                                            });
+                                            browser.redo_stack.clear();
+                                            browser.load_entries()?;
+                                        }
                                     }
                                 }
-
-                                // Re-enable raw mode
-                                terminal::enable_raw_mode()?;
-                                execute!(io::stdout(), cursor::Hide)?;
                             }
                         }
                         continue;
                     }
-                    if browser.keybindings.contains(&browser.keybindings.fuzzy_find, ch) {
+                    if browser.keybindings.contains(&browser.keybindings.fuzzy_find, ch) || browser.keybindings.contains(&browser.keybindings.fuzzy_home, ch) {
                         browser.fuzzy_mode = true;
                         browser.fuzzy_query.clear();
                         browser.fuzzy_prev_count = browser.entries.len();
+                        // fuzzy_home (?) always uses stay mode, fuzzy_find (/) uses jump mode unless Shift is held
+                        browser.fuzzy_jump_mode = browser.keybindings.contains(&browser.keybindings.fuzzy_find, ch) && !modifiers.contains(KeyModifiers::SHIFT);
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.preview_height_decrease, ch) {
@@ -2209,13 +2861,21 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                 // Handle arrow keys and special keys
                 match code {
                     KeyCode::Esc => {
-                        // Esc: cd to current directory and exit
-                        return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
+                        // Esc: quit without cd
+                        return Ok(ExitAction::None);
                     }
                     KeyCode::Up => browser.select_up(),
                     KeyCode::Down => browser.select_down(),
                     KeyCode::Left => browser.select_left(),
                     KeyCode::Right => browser.select_right(),
+                    KeyCode::Char(' ') => {
+                        // Space: Toggle list info mode in list mode, or line numbers in preview mode
+                        if browser.preview_mode {
+                            browser.show_line_numbers = !browser.show_line_numbers;
+                        } else {
+                            browser.list_info_mode = (browser.list_info_mode + 1) % 4;
+                        }
+                    }
                     KeyCode::Enter | KeyCode::Char('k') => {
                         // Enter: Select item - if file, open in editor; if directory, cd to it
                         if let Some(selected_path) = browser.get_selected_path() {
