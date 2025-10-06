@@ -23,6 +23,21 @@ https://github.com/user-attachments/assets/8a786437-1488-42c8-8c97-7261a87b1c14
 
 ## Install
 
+### Homebrew (macOS)
+
+```bash
+brew tap jordannakamoto/tap
+brew install ils
+```
+
+**Enable shell integration:**
+```bash
+echo 'source $(brew --prefix)/opt/ils/etc/ils_init.sh' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### From Source
+
 ```bash
 cargo build --release
 ./target/release/ils-bin --install
@@ -36,7 +51,8 @@ The installer creates `~/.config/ils/` and adds a shell function to your rc file
 ```bash
 ils
 ```
-? - for help
+
+Press `!` to toggle the help menu.
 
 ## Configuration
 
