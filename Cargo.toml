@@ -1,7 +1,13 @@
 [package]
 name = "ils"
-version = "0.1.0"
-edition = "2024"
+version = "0.1.1"
+edition = "2021"
+authors = ["Jordan Nakamoto <jordannakamoto@outlook.com>"]
+description = "Interactive ls - A fast, keyboard-driven file browser for the terminal"
+repository = "https://github.com/jordannakamoto/ils"
+license = "MIT"
+keywords = ["cli", "file-browser", "terminal", "tui"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "ils-bin"
