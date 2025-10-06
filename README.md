@@ -2,25 +2,6 @@
 
 Interactive file browser for the terminal.
 
-https://github.com/user-attachments/assets/715f8df6-77b7-42a5-8ebf-9776ef61292f
-
-https://github.com/user-attachments/assets/8a786437-1488-42c8-8c97-7261a87b1c14
-
-
-
-## Features
-
-- Customizable keybindings via TOML
-  defaults:
-- movement = wasd
-- back/fwd directory = j/l
-- cd folder or open file = space
-- home directory = h
-- toggle hidden folders = .
-- show help = ?
-- File preview with syntax highlighting
-- Opens files in default shell `$EDITOR`
-
 ## Install
 
 ### Homebrew (macOS)
@@ -45,6 +26,25 @@ source ~/.zshrc  # or ~/.bashrc
 ```
 
 The installer creates `~/.config/ils/` and adds a shell function to your rc file.
+
+---
+
+https://github.com/user-attachments/assets/715f8df6-77b7-42a5-8ebf-9776ef61292f
+
+https://github.com/user-attachments/assets/8a786437-1488-42c8-8c97-7261a87b1c14
+
+## Features
+
+- Customizable keybindings via TOML
+  defaults:
+- movement = wasd
+- back/fwd directory = j/l
+- cd folder or open file = space
+- home directory = h
+- toggle hidden folders = .
+- show help = !
+- File preview with syntax highlighting
+- Opens files in default shell `$EDITOR`
 
 ## Usage
 
