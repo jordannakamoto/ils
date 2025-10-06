@@ -5,6 +5,9 @@ class Ils < Formula
   sha256 "e91a48c11c6ab7241758ea249fc30c476d2d738079ab44dd5d94ac6240dfde53"
   license "MIT"
 
+  # macOS-specific features (Finder integration, macOS-specific file operations)
+  depends_on :macos
+
   depends_on "rust" => :build
 
   def install

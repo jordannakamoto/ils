@@ -183,6 +183,10 @@ struct ColorConfig {
     fuzzy_highlight_bg: String,
     #[serde(default = "default_line_number_fg")]
     line_number_fg: String,
+    #[serde(default = "default_help_menu_fg")]
+    help_menu_fg: String,
+    #[serde(default = "default_help_menu_bg")]
+    help_menu_bg: String,
 }
 
 fn default_path_fg() -> String {
@@ -239,6 +243,14 @@ fn default_fuzzy_highlight_bg() -> String {
 
 fn default_line_number_fg() -> String {
     "darkgrey".to_string()
+}
+
+fn default_help_menu_fg() -> String {
+    "white".to_string()
+}
+
+fn default_help_menu_bg() -> String {
+    "#1e1e1e".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -402,8 +414,8 @@ help = ['!']                    # Show help screen
 preview_toggle = ['p']          # Toggle preview pane
 preview_up = ['i']             # Scroll preview up
 preview_down = ['o']           # Scroll preview down
-preview_height_decrease = ['-', '_']
-preview_height_increase = ['+', '=']
+preview_height_decrease = ['_']
+preview_height_increase = ['=']
 
 # Other
 toggle_hidden = ['.']          # Toggle hidden files
@@ -465,6 +477,10 @@ fuzzy_highlight_bg = "#323232"
 
 # Line numbers in preview
 line_number_fg = "darkgrey"
+
+# Help menu (bottom of screen)
+help_menu_fg = "white"
+help_menu_bg = "#1e1e1e"
 
 # ============================================================================
 # SETTINGS
@@ -553,6 +569,8 @@ impl Default for ColorConfig {
             fuzzy_highlight_fg: default_fuzzy_highlight_fg(),
             fuzzy_highlight_bg: default_fuzzy_highlight_bg(),
             line_number_fg: default_line_number_fg(),
+            help_menu_fg: default_help_menu_fg(),
+            help_menu_bg: default_help_menu_bg(),
         }
     }
 }
@@ -709,8 +727,8 @@ impl Default for Keybindings {
             preview_toggle: vec!['p'],
             preview_up: vec!['i'],
             preview_down: vec!['o'],
-            preview_height_decrease: vec!['-', '_'],
-            preview_height_increase: vec!['+', '='],
+            preview_height_decrease: vec!['_'],
+            preview_height_increase: vec!['='],
             toggle_hidden: vec!['.'],
             fuzzy_find: vec!['/'],
             fuzzy_back: vec!['/'],
@@ -818,6 +836,7 @@ struct FileBrowser {
     calculating_sizes: bool, // Whether we're currently calculating sizes
     show_created_date: bool, // Toggle between modified and created date
     error_message: Option<String>, // Error message to display
+    input_block_until: Option<std::time::Instant>, // Block input until this time
 }
 
 impl FileBrowser {
@@ -852,8 +871,10 @@ impl FileBrowser {
             (Config::default(), None)
         };
 
-        // Check if this is first run (show help if no config exists)
-        let show_help = Config::path().map(|p| !p.exists()).unwrap_or(true);
+        // Load saved show_help state, or show help on first run
+        let show_help = Self::load_show_help().unwrap_or_else(|| {
+            Config::path().map(|p| !p.exists()).unwrap_or(true)
+        });
 
         let keybindings = config.keybindings;
         let color_config = config.colors;
@@ -898,6 +919,7 @@ impl FileBrowser {
             calculating_sizes: false,
             show_created_date: false,
             error_message: None,
+            input_block_until: None,
         };
         browser.load_entries()?;
         // Don't calculate layout here - will be done on first draw for faster startup
@@ -1004,6 +1026,23 @@ impl FileBrowser {
             fs::create_dir_all(&config_dir)?;
             let config_path = config_dir.join("preview_ratio");
             fs::write(config_path, self.preview_split_ratio.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn load_show_help() -> Option<bool> {
+        let home = env::var("HOME").ok()?;
+        let config_path = PathBuf::from(home).join(".config/ils/show_help");
+        let content = fs::read_to_string(config_path).ok()?;
+        content.trim().parse().ok()
+    }
+
+    fn save_show_help_state(&self) -> io::Result<()> {
+        if let Ok(home) = env::var("HOME") {
+            let config_dir = PathBuf::from(home).join(".config/ils");
+            fs::create_dir_all(&config_dir)?;
+            let config_path = config_dir.join("show_help");
+            fs::write(config_path, self.show_help.to_string())?;
         }
         Ok(())
     }
@@ -1125,12 +1164,6 @@ impl FileBrowser {
         // Ensure layout is calculated (deferred from new() for faster startup)
         self.update_layout()?;
 
-        // Show help screen if requested
-        if self.show_help {
-            self.draw_help(&mut stdout, width, height)?;
-            stdout.flush()?;
-            return Ok(());
-        }
 
         // Calculate split if in preview mode
         let split_line = if self.preview_mode {
@@ -1238,7 +1271,12 @@ impl FileBrowser {
                     // In grid mode or list mode with info, truncate to NAME_WIDTH
                     // In list mode without info, don't truncate
                     if (!self.list_mode || (self.list_mode && self.list_info_mode > 0)) && display_name.len() > NAME_WIDTH {
-                        display_name.truncate(NAME_WIDTH - 1);
+                        // Find a valid UTF-8 boundary for truncation
+                        let mut truncate_at = NAME_WIDTH - 1;
+                        while truncate_at > 0 && !display_name.is_char_boundary(truncate_at) {
+                            truncate_at -= 1;
+                        }
+                        display_name.truncate(truncate_at);
                         display_name.push('~');
                     }
 
@@ -1393,22 +1431,67 @@ impl FileBrowser {
                                             // Use "Aug '25" format for dates > 3 months
                                             use std::time::UNIX_EPOCH;
                                             if let Ok(duration) = time.duration_since(UNIX_EPOCH) {
-                                                let timestamp = duration.as_secs() as i64;
-                                                let days_since_epoch = timestamp / 86400;
-                                                let year = 1970 + (days_since_epoch / 365);
-                                                let day_in_year = days_since_epoch % 365;
-                                                let month_idx = (day_in_year / 30).min(11) as usize;
+                                                let timestamp = duration.as_secs();
+
+                                                // Special case: Unix epoch (likely means unknown/unset date)
+                                                if timestamp == 0 {
+                                                    format!("{:>9}", "unknown")
+                                                } else {
+                                                    // Proper date calculation accounting for leap years
+                                                let mut year = 1970;
+                                                let mut remaining_secs = timestamp;
+
+                                                // Skip through years
+                                                loop {
+                                                    let year_secs = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                                                        366 * 86400 // leap year
+                                                    } else {
+                                                        365 * 86400 // normal year
+                                                    };
+
+                                                    if remaining_secs < year_secs {
+                                                        break;
+                                                    }
+                                                    remaining_secs -= year_secs;
+                                                    year += 1;
+                                                }
+
+                                                // Calculate month
+                                                let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+                                                let days_in_months = if is_leap {
+                                                    [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                                                } else {
+                                                    [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                                                };
+
+                                                let mut remaining_days = (remaining_secs / 86400) as usize;
+                                                let mut month_idx = 0;
+
+                                                for (i, &days) in days_in_months.iter().enumerate() {
+                                                    if remaining_days < days {
+                                                        month_idx = i;
+                                                        break;
+                                                    }
+                                                    remaining_days -= days;
+                                                }
+
                                                 let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                                                format!("{} '{:02}", months[month_idx], year % 100)
+                                                format!("{:>9}", format!("{} '{:02}", months[month_idx], year % 100))
+                                                }
                                             } else {
                                                 format!("{:>9}s", secs)
                                             }
                                         };
 
+                                        let date_color = if self.show_created_date {
+                                            Color::DarkCyan // Created date
+                                        } else {
+                                            Color::DarkGrey // Modified date
+                                        };
                                         queue!(
                                             stdout,
-                                            SetForegroundColor(Color::DarkGrey),
+                                            SetForegroundColor(date_color),
                                             Print(format!("  {}", date_str)),
                                             ResetColor
                                         )?;
@@ -1520,6 +1603,7 @@ impl FileBrowser {
                         let mut dirs = 0;
                         let mut files = 0;
                         let mut total_size: u64 = 0;
+                        let mut has_uncached_dirs = false;
                         let mut items: Vec<(String, bool)> = Vec::new();
 
                         for entry in entries.filter_map(|e| e.ok()) {
@@ -1532,8 +1616,13 @@ impl FileBrowser {
 
                             if is_dir {
                                 dirs += 1;
-                                // Add recursive size for directories
-                                total_size += Self::calculate_dir_size(&path);
+                                // Check if size is cached, otherwise calculate and cache it
+                                if let Some(&cached_size) = self.dir_size_cache.get(&path) {
+                                    total_size += cached_size;
+                                } else {
+                                    // Calculate in preview without blocking
+                                    has_uncached_dirs = true;
+                                }
                                 items.push((name, true));
                             } else {
                                 files += 1;
@@ -1562,7 +1651,7 @@ impl FileBrowser {
                             ResetColor
                         )?;
 
-                        // Display size
+                        // Display size (only files, subdirectories would require recursive calculation)
                         let size_str = if total_size < 1024 {
                             format!("{} B", total_size)
                         } else if total_size < 1024 * 1024 {
@@ -1573,11 +1662,17 @@ impl FileBrowser {
                             format!("{:.1} GB", total_size as f64 / (1024.0 * 1024.0 * 1024.0))
                         };
 
+                        let size_display = if has_uncached_dirs {
+                            format!("{} (files only, dirs not calculated)", size_str)
+                        } else {
+                            size_str
+                        };
+
                         queue!(stdout, cursor::MoveTo(0, split_line + 2))?;
                         queue!(
                             stdout,
                             SetForegroundColor(Color::DarkGrey),
-                            Print(format!("Size: {}", size_str)),
+                            Print(format!("Size: {}", size_display)),
                             ResetColor
                         )?;
 
@@ -1769,6 +1864,9 @@ impl FileBrowser {
                 Print(format!(" ERROR: {} ", error_msg)),
                 ResetColor
             )?;
+        } else if self.show_help {
+            // Show contextual help in footer
+            self.draw_footer_help(&mut stdout, width, height)?;
         }
 
         // Flush all queued commands simultaneously to minimize flicker
@@ -1776,67 +1874,113 @@ impl FileBrowser {
         Ok(())
     }
 
-    fn draw_help(&mut self, stdout: &mut io::Stdout, width: u16, height: u16) -> io::Result<()> {
-        execute!(stdout, cursor::MoveTo(0, self.start_row))?;
-        execute!(stdout, terminal::Clear(ClearType::FromCursorDown))?;
+    fn draw_footer_help(&mut self, stdout: &mut io::Stdout, width: u16, height: u16) -> io::Result<()> {
+        // Helper to format keybindings
+        let fmt_keys = |keys: &Vec<char>| -> String {
+            keys.iter().map(|c| format!("{}", c)).collect::<Vec<_>>().join("/")
+        };
 
-        let help_text = vec![
-            "",
-            "╔══════════════════════════════════════╗",
-            "║      Interactive ls - Welcome!       ║",
-            "╚══════════════════════════════════════╝",
-            "",
-            "NAVIGATION:",
-            "  wasd / ↑↓←→        -  Move cursor",
-            "  l / Enter / k      -  Open directory/file",
-            "  j / b / Backspace  -  Go back",
-            "  h                  -  Go home",
-            "  n                  -  Next sibling directory",
-            "  Shift+n            -  Previous sibling directory",
-            "  .                  -  Toggle hidden files",
-            "  m                  -  Toggle list/grid mode",
-            "",
-            "FILE OPERATIONS:",
-            "  r                  -  Rename selected file",
-            "  y                  -  Create file/dir (end with / for dir)",
-            "  c                  -  Copy to clipboard",
-            "  v                  -  Paste from clipboard",
-            "  x                  -  Move to trash",
-            "  Shift+x            -  Permanently delete (with warning)",
-            "  z                  -  Undo (copy/rename/create)",
-            "  Shift+z            -  Redo",
-            "",
-            "FUZZY FIND:",
-            "  /                  -  Enter fuzzy find mode",
-            "  Type to search     -  Auto-navigate on unique match",
-            "  Enter              -  Open selected item (in find mode)",
-            "  /                  -  Go back (in find mode)",
-            "  ?                  -  Go home (in find mode)",
-            "  Esc                -  Exit find mode",
-            "",
-            "EXIT:",
-            "  Esc                -  Quit without cd",
-            "  q                  -  Exit and cd to current directory",
-            "  Shift+q            -  Open current directory in Finder",
-            "",
-            "PREVIEW:",
-            "  p                  -  Toggle preview",
-            "  i / o              -  Scroll preview up/down",
-            "  Shift+I / Shift+O  -  Scroll preview faster",
-            "  - / +              -  Decrease/increase preview height",
-            "",
-            "  ?                  -  Toggle this help",
-            "",
-            "Press any key to continue...",
-        ];
+        let help_text = if self.fuzzy_mode {
+            // Fuzzy mode help
+            let mode_info = if self.fuzzy_jump_mode { "Jump Mode" } else { "Continuous Mode (Shift+/)" };
+            format!(
+                " {} │ {} Back │ {} Home │ Enter Open │ Esc Cancel │ ! Toggle Help",
+                mode_info,
+                fmt_keys(&self.keybindings.fuzzy_back),
+                fmt_keys(&self.keybindings.fuzzy_home)
+            )
+        } else if self.preview_mode {
+            // Preview mode help
+            format!(
+                " {}/{} Scroll │ Shift+{}/{} Scroll Page │ {}/{} Resize Pane │ Space Toggle Line# │ {} Close Preview │ ! Toggle Help",
+                fmt_keys(&self.keybindings.preview_up),
+                fmt_keys(&self.keybindings.preview_down),
+                fmt_keys(&self.keybindings.preview_up),
+                fmt_keys(&self.keybindings.preview_down),
+                fmt_keys(&self.keybindings.preview_height_decrease),
+                fmt_keys(&self.keybindings.preview_height_increase),
+                fmt_keys(&self.keybindings.preview_toggle)
+            )
+        } else if self.list_mode {
+            // List mode help
+            format!(
+                " {}/{}/{}/{} Nav │ {} Forward │ Enter Open │ {} Back │ {} Home │ Space Info │ e Extra │ {} Grid Mode │ {} Find │ {} Preview │ {} Exit │ ! Toggle Help",
+                fmt_keys(&self.keybindings.up),
+                fmt_keys(&self.keybindings.down),
+                fmt_keys(&self.keybindings.left),
+                fmt_keys(&self.keybindings.right),
+                fmt_keys(&self.keybindings.open),
+                fmt_keys(&self.keybindings.back),
+                fmt_keys(&self.keybindings.home),
+                fmt_keys(&self.keybindings.toggle_mode),
+                fmt_keys(&self.keybindings.fuzzy_find),
+                fmt_keys(&self.keybindings.preview_toggle),
+                fmt_keys(&self.keybindings.quit)
+            )
+        } else {
+            // Normal (grid) mode help
+            format!(
+                " {}/{}/{}/{} Nav │ {} Forward │ Enter Open │ {} Back │ {} Home │ {}/{} Sibling │ {} Find │ {} List Mode │ {} Preview │ {} Exit │ ! Toggle Help",
+                fmt_keys(&self.keybindings.up),
+                fmt_keys(&self.keybindings.down),
+                fmt_keys(&self.keybindings.left),
+                fmt_keys(&self.keybindings.right),
+                fmt_keys(&self.keybindings.open),
+                fmt_keys(&self.keybindings.back),
+                fmt_keys(&self.keybindings.home),
+                fmt_keys(&self.keybindings.next_sibling),
+                fmt_keys(&self.keybindings.prev_sibling),
+                fmt_keys(&self.keybindings.fuzzy_find),
+                fmt_keys(&self.keybindings.toggle_mode),
+                fmt_keys(&self.keybindings.preview_toggle),
+                fmt_keys(&self.keybindings.quit)
+            )
+        };
 
-        let start_row = self.start_row + 1;
+        // File operations help (second row) - only show in grid/list mode
+        let file_ops_text = if !self.fuzzy_mode && !self.preview_mode {
+            Some(format!(
+                " {} New │ {} Rename │ {}/{} Copy/Paste │ {} Trash │ {} Delete │ {} Undo │ Shift+{} Exit to Finder",
+                fmt_keys(&self.keybindings.create),
+                fmt_keys(&self.keybindings.rename),
+                fmt_keys(&self.keybindings.copy),
+                fmt_keys(&self.keybindings.paste),
+                fmt_keys(&self.keybindings.trash),
+                fmt_keys(&self.keybindings.delete),
+                fmt_keys(&self.keybindings.undo),
+                fmt_keys(&self.keybindings.quit)
+            ))
+        } else {
+            None
+        };
 
-        for (i, line) in help_text.iter().enumerate() {
-            queue!(stdout, cursor::MoveTo(0, start_row + i as u16))?;
-            queue!(stdout, SetForegroundColor(Color::Cyan))?;
-            queue!(stdout, Print(line))?;
-            queue!(stdout, ResetColor)?;
+        // Determine rows for help text
+        let (help_row, file_ops_row) = if self.fuzzy_mode {
+            (height.saturating_sub(2), None)
+        } else if file_ops_text.is_some() {
+            (height.saturating_sub(2), Some(height.saturating_sub(1)))
+        } else {
+            (height.saturating_sub(1), None)
+        };
+
+        // Draw main help row
+        queue!(
+            stdout,
+            cursor::MoveTo(0, help_row),
+            SetForegroundColor(Color::DarkGrey),
+            Print(&help_text),
+            ResetColor
+        )?;
+
+        // Draw file operations row if present
+        if let (Some(ops_text), Some(ops_row)) = (file_ops_text, file_ops_row) {
+            queue!(
+                stdout,
+                cursor::MoveTo(0, ops_row),
+                SetForegroundColor(Color::DarkGrey),
+                Print(&ops_text),
+                ResetColor
+            )?;
         }
 
         Ok(())
@@ -2369,30 +2513,9 @@ impl FileBrowser {
 fn show_welcome_pages() -> io::Result<()> {
     use crossterm::event::{self, Event, KeyCode};
 
-    // Page 1: Welcome & General Info
+    // Page 1: Shell Integration Setup (Important)
     println!("\n{}", "=".repeat(60));
-    println!("  Welcome to ils - Interactive ls");
-    println!("{}", "=".repeat(60));
-    println!("\nA fast, keyboard-driven file browser for the terminal.\n");
-    println!("Features:");
-    println!("  • Fuzzy find navigation");
-    println!("  • File preview with syntax highlighting");
-    println!("  • Image and PDF preview");
-    println!("  • Permission editing, file operations, and more");
-    println!("\nPress any key to continue...");
-
-    terminal::enable_raw_mode()?;
-    loop {
-        if let Event::Key(_) = event::read()? {
-            break;
-        }
-    }
-    terminal::disable_raw_mode()?;
-
-    // Page 2: Shell Integration Setup
-    execute!(io::stdout(), terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
-    println!("\n{}", "=".repeat(60));
-    println!("  Shell Integration Setup");
+    println!("  IMPORTANT: Shell Integration Setup");
     println!("{}", "=".repeat(60));
     println!("\nTo navigate directories, ils needs a shell wrapper function.");
     println!("This allows 'cd' to work when you exit the browser.\n");
@@ -2455,26 +2578,43 @@ ils() {
     }
     terminal::disable_raw_mode()?;
 
-    // Page 3: Quick Start / Help
+    // Page 2: Help
     execute!(io::stdout(), terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
     println!("\n{}", "=".repeat(60));
-    println!("  Quick Start Guide");
+    println!("  Welcome to ils - Interactive File Browser");
     println!("{}", "=".repeat(60));
+    println!("\n  TIP: Press ! at any time to toggle the help menu");
+    println!("       The help menu shows context-aware keybindings\n");
+    println!("{}", "-".repeat(60));
     println!("\nBasic Navigation:");
-    println!("  w/s/a/d or arrows  -  Navigate");
-    println!("  Enter or l         -  Open file/directory");
-    println!("  j or b             -  Go back");
-    println!("  h                  -  Go home");
-    println!("\nFuzzy Find:");
-    println!("  /                  -  Jump mode (auto-exit)");
-    println!("  Shift+/ or ?       -  Stay mode (keep searching)");
-    println!("\nOther:");
-    println!("  p                  -  Toggle preview");
+    println!("  w/s/a/d (& arrows) -  Navigate. Hold shift for jumping further");
+    println!("  j/l  (also b)      -  Move Back/Forward Directories");
+    println!("  n/N                -  Next/Previous sibling directory");
+    println!("  h                  -  Go to home directory");
+    println!("  .                  -  Toggle hidden files/folders");
     println!("  m                  -  Toggle list mode");
-    println!("  Space              -  Toggle file info / line numbers");
-    println!("  !                  -  Help menu");
+    println!("  Space              -  Toggle file info / line numbers in list mode");
+    println!("  e                  -  Extra function per view in list mode");
+    println!("\nFuzzy Nav:");
+    println!("  /                  -  Jump (type to navigate to first match)");
+    println!("  /                  -  Move Back (while in Fuzzy Nav Find Mode)");
+    println!("  Shift+/            -  Run Find mode continually");
+    println!("\nPreview:");
+    println!("  p                  -  Toggle preview");
+    println!("  i/o                -  Scroll preview");
+    println!("  -/=                -  Adjust preview pane height");
+    println!("\nFile Management:");
+    println!("  y                  -  New Folder/File");
+    println!("  x                  -  Move to Trash");
+    println!("  shift+x            -  Remove and delete permanently");
+    println!("  c/v                -  Copy and Paste");
+    println!("  r                  -  Rename");
+    println!("  z                  -  Undo Create, Rename, Copy/Paste");
+    println!("\nExiting or Opening File:");
     println!("  Esc                -  Quit without cd");
-    println!("  q                  -  Exit and cd to directory");
+    println!("  Enter or k         -  Exit and cd/open selected directory/file");
+    println!("  q                  -  Exit and cd to current location");
+    println!("  shift+q            -  Exit and open current location in Finder");
     println!("\nPress any key to start...");
 
     terminal::enable_raw_mode()?;
@@ -2624,13 +2764,19 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
 
         match event::read()? {
             Event::Key(KeyEvent { code, modifiers, .. }) => {
+                // Check if input is blocked
+                if let Some(block_until) = browser.input_block_until {
+                    if std::time::Instant::now() < block_until {
+                        // Input is blocked, ignore this event
+                        continue;
+                    } else {
+                        // Block period expired
+                        browser.input_block_until = None;
+                    }
+                }
+
                 // Clear error message on any key press
                 browser.error_message = None;
-                // If help is showing, any key dismisses it
-                if browser.show_help {
-                    browser.show_help = false;
-                    continue;
-                }
 
                 // Handle fuzzy find mode
                 if browser.fuzzy_mode {
@@ -2758,15 +2904,8 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                                         browser.fuzzy_prev_count = browser.entries.len();
                                     }
 
-                                    // Drain any pending keyboard events to prevent accidental typing
-                                    let drain_start = std::time::Instant::now();
-                                    while drain_start.elapsed() < Duration::from_millis(500) {
-                                        if event::poll(Duration::from_millis(50))? {
-                                            if let Event::Key(_) = event::read()? {
-                                                // Discard buffered key events
-                                            }
-                                        }
-                                    }
+                                    // Block input for 500ms to prevent accidental typing
+                                    browser.input_block_until = Some(std::time::Instant::now() + Duration::from_millis(500));
                                 } else {
                                     browser.fuzzy_prev_count = count;
                                 }
@@ -2783,6 +2922,7 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                 if let KeyCode::Char(ch) = code {
                     if browser.keybindings.contains(&browser.keybindings.help, ch) || ch == '!' {
                         browser.show_help = !browser.show_help;
+                        let _ = browser.save_show_help_state();
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.quit, ch) {
