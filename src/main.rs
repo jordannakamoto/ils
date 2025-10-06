@@ -2578,43 +2578,21 @@ ils() {
     }
     terminal::disable_raw_mode()?;
 
-    // Page 2: Help
+    // Page 2: Getting Started
     execute!(io::stdout(), terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
     println!("\n{}", "=".repeat(60));
     println!("  Welcome to ils - Interactive File Browser");
     println!("{}", "=".repeat(60));
-    println!("\n  TIP: Press ! at any time to toggle the help menu");
-    println!("       The help menu shows context-aware keybindings\n");
+    println!("\n  Getting Started:\n");
+    println!("  • Press ! at any time to toggle the help menu");
+    println!("    The help menu shows context-aware keybindings for");
+    println!("    navigation, file operations, and more.\n");
+    println!("  • Run 'ils --config' to view/edit configuration");
+    println!("    Customize keybindings, colors, and behavior.\n");
+    println!("  • Configuration location: ~/.config/ils/\n");
     println!("{}", "-".repeat(60));
-    println!("\nBasic Navigation:");
-    println!("  w/s/a/d (& arrows) -  Navigate. Hold shift for jumping further");
-    println!("  j/l  (also b)      -  Move Back/Forward Directories");
-    println!("  n/N                -  Next/Previous sibling directory");
-    println!("  h                  -  Go to home directory");
-    println!("  .                  -  Toggle hidden files/folders");
-    println!("  m                  -  Toggle list mode");
-    println!("  Space              -  Toggle file info / line numbers in list mode");
-    println!("  e                  -  Extra function per view in list mode");
-    println!("\nFuzzy Nav:");
-    println!("  /                  -  Jump (type to navigate to first match)");
-    println!("  /                  -  Move Back (while in Fuzzy Nav Find Mode)");
-    println!("  Shift+/            -  Run Find mode continually");
-    println!("\nPreview:");
-    println!("  p                  -  Toggle preview");
-    println!("  i/o                -  Scroll preview");
-    println!("  -/=                -  Adjust preview pane height");
-    println!("\nFile Management:");
-    println!("  y                  -  New Folder/File");
-    println!("  x                  -  Move to Trash");
-    println!("  shift+x            -  Remove and delete permanently");
-    println!("  c/v                -  Copy and Paste");
-    println!("  r                  -  Rename");
-    println!("  z                  -  Undo Create, Rename, Copy/Paste");
-    println!("\nExiting or Opening File:");
-    println!("  Esc                -  Quit without cd");
-    println!("  Enter or k         -  Exit and cd/open selected directory/file");
-    println!("  q                  -  Exit and cd to current location");
-    println!("  shift+q            -  Exit and open current location in Finder");
+    println!("\n  That's it! Press ! for help when you're inside.\n");
+    println!("{}", "=".repeat(60));
     println!("\nPress any key to start...");
 
     terminal::enable_raw_mode()?;
@@ -2651,7 +2629,7 @@ fn main() -> io::Result<()> {
     }
 
     // Check for config command
-    if args.len() > 1 && args[1] == "config" {
+    if args.len() > 1 && (args[1] == "config" || args[1] == "--config") {
         // Create default config if it doesn't exist
         if let Some(config_path) = Config::path() {
             if !config_path.exists() {
