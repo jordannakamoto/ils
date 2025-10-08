@@ -12,7 +12,7 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
     sync::{Arc, Mutex},
 };
 use syntect::{
@@ -177,6 +177,7 @@ struct Keybindings {
     fuzzy_find: Vec<char>,
     fuzzy_back: Vec<char>,
     fuzzy_home: Vec<char>,
+    history_jump: Vec<char>,
     toggle_mode: Vec<char>,
     rename: Vec<char>,
     next_sibling: Vec<char>,
@@ -228,6 +229,12 @@ struct ColorConfig {
     help_menu_fg: String,
     #[serde(default = "default_help_menu_bg")]
     help_menu_bg: String,
+    #[serde(default = "default_history_query_fg")]
+    history_query_fg: String,
+    #[serde(default = "default_history_path_fg")]
+    history_path_fg: String,
+    #[serde(default = "default_history_count_fg")]
+    history_count_fg: String,
 }
 
 fn default_path_fg() -> String {
@@ -275,7 +282,7 @@ fn default_cursor_bg() -> String {
 }
 
 fn default_fuzzy_highlight_fg() -> String {
-    "#ffff00".to_string()
+    "#88cc88".to_string()  // Soft green
 }
 
 fn default_fuzzy_highlight_bg() -> String {
@@ -292,6 +299,18 @@ fn default_help_menu_fg() -> String {
 
 fn default_help_menu_bg() -> String {
     "#1e1e1e".to_string()
+}
+
+fn default_history_query_fg() -> String {
+    "cyan".to_string()
+}
+
+fn default_history_path_fg() -> String {
+    "cyan".to_string()
+}
+
+fn default_history_count_fg() -> String {
+    "darkgrey".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -322,6 +341,14 @@ struct Settings {
     wrapper_validation_cache_valid: bool,
     #[serde(default = "default_show_help_on_start")]
     show_help_on_start: bool,
+    #[serde(default = "default_show_history_visit_count")]
+    show_history_visit_count: bool,
+    #[serde(default = "default_history_max_results")]
+    history_max_results: usize,
+    #[serde(default = "default_history_max_storage")]
+    history_max_storage: usize,
+    #[serde(default = "default_history_prioritize_basename")]
+    history_prioritize_basename: bool,
 }
 
 fn default_exit_after_edit() -> bool {
@@ -364,6 +391,22 @@ fn default_show_help_on_start() -> bool {
     true
 }
 
+fn default_show_history_visit_count() -> bool {
+    false
+}
+
+fn default_history_max_results() -> usize {
+    12
+}
+
+fn default_history_max_storage() -> usize {
+    1000
+}
+
+fn default_history_prioritize_basename() -> bool {
+    true
+}
+
 fn default_preview_split_ratio() -> f32 {
     0.5
 }
@@ -374,6 +417,148 @@ fn default_case_sensitive_search() -> bool {
 
 fn default_show_dir_slash() -> bool {
     true
+}
+
+// Directory history for frecency-based navigation
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct DirectoryEntry {
+    path: String,
+    visit_count: usize,
+    last_accessed: u64,  // Unix timestamp
+    first_accessed: u64, // Unix timestamp
+}
+
+impl DirectoryEntry {
+    fn new(path: String) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        DirectoryEntry {
+            path,
+            visit_count: 1,
+            last_accessed: now,
+            first_accessed: now,
+        }
+    }
+
+    fn update_visit(&mut self) {
+        self.visit_count += 1;
+        self.last_accessed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+    }
+
+    fn frecency_score(&self) -> f64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let age_seconds = now.saturating_sub(self.last_accessed) as f64;
+        let age_hours = age_seconds / 3600.0;
+
+        // Decay function: recent visits are weighted more heavily
+        let recency_weight = if age_hours < 1.0 {
+            4.0
+        } else if age_hours < 24.0 {
+            2.0
+        } else if age_hours < 168.0 { // 1 week
+            1.0
+        } else {
+            0.5
+        };
+
+        (self.visit_count as f64) * recency_weight
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct DirectoryHistory {
+    entries: HashMap<String, DirectoryEntry>,
+}
+
+impl DirectoryHistory {
+    fn load() -> Self {
+        if let Ok(home) = env::var("HOME") {
+            let history_path = PathBuf::from(home).join(".config/ils/history.json");
+            if let Ok(content) = fs::read_to_string(&history_path) {
+                if let Ok(history) = serde_json::from_str(&content) {
+                    return history;
+                }
+            }
+        }
+        DirectoryHistory::default()
+    }
+
+    fn save(&self) -> io::Result<()> {
+        if let Ok(home) = env::var("HOME") {
+            let config_dir = PathBuf::from(&home).join(".config/ils");
+            fs::create_dir_all(&config_dir)?;
+            let history_path = config_dir.join("history.json");
+            let content = serde_json::to_string_pretty(self)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            fs::write(history_path, content)?;
+        }
+        Ok(())
+    }
+
+    fn record_visit(&mut self, path: &PathBuf, max_storage: usize) {
+        let path_str = path.to_string_lossy().to_string();
+
+        if let Some(entry) = self.entries.get_mut(&path_str) {
+            entry.update_visit();
+        } else {
+            self.entries.insert(path_str.clone(), DirectoryEntry::new(path_str));
+        }
+
+        // Cleanup old entries every 100 visits (probabilistic)
+        if self.entries.len() % 100 == 0 {
+            self.cleanup_old_entries(max_storage);
+        }
+    }
+
+    fn get_sorted_by_frecency(&self) -> Vec<DirectoryEntry> {
+        let mut entries: Vec<DirectoryEntry> = self.entries.values().cloned().collect();
+        entries.sort_by(|a, b| {
+            b.frecency_score().partial_cmp(&a.frecency_score()).unwrap()
+        });
+        // Limit to top 1000 entries for performance
+        entries.truncate(1000);
+        entries
+    }
+
+    fn cleanup_old_entries(&mut self, max_storage: usize) {
+        // Remove entries older than 90 days with no recent visits
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let ninety_days = 90 * 24 * 60 * 60;
+
+        self.entries.retain(|_, entry| {
+            let age = now.saturating_sub(entry.last_accessed);
+            age < ninety_days || entry.visit_count > 5
+        });
+
+        // If still too many entries, keep only top N by frecency
+        if self.entries.len() > max_storage {
+            let mut sorted: Vec<_> = self.entries.iter().collect();
+            sorted.sort_by(|a, b| {
+                b.1.frecency_score().partial_cmp(&a.1.frecency_score()).unwrap()
+            });
+
+            let to_keep: std::collections::HashSet<String> = sorted
+                .iter()
+                .take(max_storage)
+                .map(|(k, _)| k.to_string())
+                .collect();
+
+            self.entries.retain(|k, _| to_keep.contains(k));
+        }
+    }
 }
 
 impl Default for Settings {
@@ -392,6 +577,10 @@ impl Default for Settings {
             debug_show_welcome: default_debug_show_welcome(),
             wrapper_validation_cache_valid: default_wrapper_validation_cache_valid(),
             show_help_on_start: default_show_help_on_start(),
+            show_history_visit_count: default_show_history_visit_count(),
+            history_max_results: default_history_max_results(),
+            history_max_storage: default_history_max_storage(),
+            history_prioritize_basename: default_history_prioritize_basename(),
         }
     }
 }
@@ -488,6 +677,7 @@ preview_height_increase = ['+'] # Increase preview pane height
 # Other
 toggle_hidden = ['.']          # Toggle hidden files
 fuzzy_find = ['/']             # Enter fuzzy find mode
+history_jump = ['f']           # Jump to frequently visited directory
 
 # Fuzzy find mode controls
 fuzzy_back = ['/']             # Go back one directory (in fuzzy mode)
@@ -645,6 +835,9 @@ impl Default for ColorConfig {
             line_number_fg: default_line_number_fg(),
             help_menu_fg: default_help_menu_fg(),
             help_menu_bg: default_help_menu_bg(),
+            history_query_fg: default_history_query_fg(),
+            history_path_fg: default_history_path_fg(),
+            history_count_fg: default_history_count_fg(),
         }
     }
 }
@@ -731,6 +924,18 @@ impl ColorConfig {
         Self::parse_color_string(&self.line_number_fg)
     }
 
+    fn parse_history_query_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.history_query_fg)
+    }
+
+    fn parse_history_path_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.history_path_fg)
+    }
+
+    fn parse_history_count_fg(&self) -> Option<Color> {
+        Self::parse_color_string(&self.history_count_fg)
+    }
+
     fn parse_color_string(color_str: &str) -> Option<Color> {
         let color_str = color_str.trim().to_lowercase();
 
@@ -807,6 +1012,7 @@ impl Default for Keybindings {
             fuzzy_find: vec!['/'],
             fuzzy_back: vec!['/'],
             fuzzy_home: vec!['?'],
+            history_jump: vec!['f'],
             toggle_mode: vec!['m'],
             rename: vec!['r'],
             next_sibling: vec!['n'],
@@ -912,6 +1118,10 @@ struct FileBrowser {
     error_message: Option<String>, // Error message to display
     input_block_until: Option<std::time::Instant>, // Block input until this time
     wrapper_warning: bool, // Whether to show wrapper not installed warning
+    dir_history: DirectoryHistory, // Directory visit history for frecency
+    history_mode: bool, // Whether we're in history navigation mode
+    history_query: String, // Query for history search
+    history_filtered: Vec<DirectoryEntry>, // Filtered history results
 }
 
 impl FileBrowser {
@@ -1009,7 +1219,7 @@ impl FileBrowser {
 
         // start drawing content on the row *after* the initial position
         let mut browser = FileBrowser {
-            current_dir: start_dir,
+            current_dir: start_dir.clone(),
             entries: Vec::new(),
             selected: 0,
             scroll_offset: 0,
@@ -1045,8 +1255,16 @@ impl FileBrowser {
             error_message: None,
             input_block_until: None,
             wrapper_warning: false,
+            dir_history: DirectoryHistory::load(),
+            history_mode: false,
+            history_query: String::new(),
+            history_filtered: Vec::new(),
         };
         browser.load_entries()?;
+
+        // Record initial directory visit
+        browser.dir_history.record_visit(&start_dir, browser.settings.history_max_storage);
+        let _ = browser.dir_history.save();
         // Don't calculate layout here - will be done on first draw for faster startup
 
         Ok(browser)
@@ -1321,8 +1539,92 @@ impl FileBrowser {
         // Move cursor to where file list starts.
         queue!(stdout, cursor::MoveTo(0, start_content_row))?;
 
-        // Display entries
-        if self.entries.is_empty() {
+        // Display entries - either history mode or normal file browsing
+        if self.history_mode {
+            // History mode - zoxide-style directory jump
+            // Show query prompt
+            let query_color = self.color_config.parse_history_query_fg().unwrap_or(Color::Cyan);
+            queue!(
+                stdout,
+                SetForegroundColor(query_color),
+                Print(format!("Jump to: {}", self.history_query)),
+                Print("█"), // Cursor
+                ResetColor,
+                Print("\r\n\r\n")
+            )?;
+
+            // Show filtered results
+            if !self.history_filtered.is_empty() {
+                let max_display_rows = (display_height as usize).saturating_sub(self.start_row as usize).saturating_sub(4);
+                let start_idx = self.scroll_offset;
+                let end_idx = (start_idx + max_display_rows).min(self.history_filtered.len());
+
+                for idx in start_idx..end_idx {
+                    let entry = &self.history_filtered[idx];
+                    let is_selected = idx == self.selected;
+
+                    let prefix = if is_selected { "> " } else { "  " };
+
+                    // Print prefix with cursor color
+                    if is_selected {
+                        if let Some(cursor_color) = self.color_config.parse_cursor_fg() {
+                            queue!(stdout, SetForegroundColor(cursor_color))?;
+                        } else {
+                            queue!(stdout, SetForegroundColor(Color::Green))?;
+                        }
+                        if let Some(cursor_bg) = self.color_config.parse_cursor_bg() {
+                            queue!(stdout, crossterm::style::SetBackgroundColor(cursor_bg))?;
+                        }
+                    }
+                    queue!(stdout, Print(prefix))?;
+
+                    // Display path with highlighting
+                    let path_color = if is_selected {
+                        self.color_config.parse_selected_fg().unwrap_or(Color::Green)
+                    } else {
+                        self.color_config.parse_history_path_fg().unwrap_or(Color::Cyan)
+                    };
+
+                    // Find and highlight the query match
+                    let query_lower = self.history_query.to_lowercase();
+                    let path_lower = entry.path.to_lowercase();
+
+                    if let Some(match_pos) = path_lower.find(&query_lower) {
+                        // Print before match
+                        queue!(stdout, SetForegroundColor(path_color), Print(&entry.path[..match_pos]))?;
+
+                        // Print matched part with highlight
+                        let match_end = match_pos + self.history_query.len();
+                        queue!(
+                            stdout,
+                            crossterm::style::SetAttribute(crossterm::style::Attribute::Bold),
+                            SetForegroundColor(self.color_config.parse_fuzzy_highlight_fg().unwrap_or(Color::Yellow)),
+                            Print(&entry.path[match_pos..match_end]),
+                            crossterm::style::SetAttribute(crossterm::style::Attribute::Reset)
+                        )?;
+
+                        // Print after match
+                        queue!(stdout, SetForegroundColor(path_color), Print(&entry.path[match_end..]))?;
+                    } else {
+                        queue!(stdout, SetForegroundColor(path_color), Print(&entry.path))?;
+                    }
+
+                    // Show visit count if setting is enabled
+                    if self.settings.show_history_visit_count {
+                        let count_color = self.color_config.parse_history_count_fg().unwrap_or(Color::DarkGrey);
+                        queue!(
+                            stdout,
+                            ResetColor,
+                            SetForegroundColor(count_color),
+                            Print(format!(" ({})", entry.visit_count)),
+                            ResetColor
+                        )?;
+                    }
+
+                    queue!(stdout, ResetColor, Print("\r\n"))?;
+                }
+            }
+        } else if self.entries.is_empty() {
             queue!(
                 stdout,
                 SetForegroundColor(Color::Yellow),
@@ -1978,7 +2280,12 @@ impl FileBrowser {
             keys.iter().map(|c| format!("{}", c)).collect::<Vec<_>>().join("/")
         };
 
-        let help_text = if self.fuzzy_mode {
+        let help_text = if self.history_mode {
+            // History mode help
+            format!(
+                " Frecency Jump │ Type to filter │ Tab/↑/↓ Navigate results │ Enter Jump │ Esc Cancel"
+            )
+        } else if self.fuzzy_mode {
             // Fuzzy mode help
             let mode_info = if self.fuzzy_jump_mode { "Jump Mode" } else { "Continuous Mode (Shift+/)" };
             format!(
@@ -2038,7 +2345,7 @@ impl FileBrowser {
         };
 
         // File operations help (second row) - only show in grid/list mode
-        let file_ops_text = if !self.fuzzy_mode && !self.preview_mode {
+        let file_ops_text = if !self.fuzzy_mode && !self.preview_mode && !self.history_mode {
             Some(format!(
                 " File Operations: {} New │ {} Rename │ {}/{} Copy/Paste │ {} Trash │ {} Delete │ {} Undo",
                 fmt_keys(&self.keybindings.create),
@@ -2055,7 +2362,7 @@ impl FileBrowser {
 
         // Determine rows for help text (account for wrapper warning if present)
         let wrapper_warning_offset = if self.wrapper_warning { 1 } else { 0 };
-        let (help_row, file_ops_row) = if self.fuzzy_mode {
+        let (help_row, file_ops_row) = if self.history_mode || self.fuzzy_mode {
             (height.saturating_sub(2 + wrapper_warning_offset), None)
         } else if file_ops_text.is_some() {
             (height.saturating_sub(2 + wrapper_warning_offset), Some(height.saturating_sub(1 + wrapper_warning_offset)))
@@ -2111,6 +2418,24 @@ impl FileBrowser {
     }
 
     fn select_up(&mut self) {
+        // In history mode, just move up one item (list mode) with wrapping
+        if self.history_mode {
+            if !self.history_filtered.is_empty() {
+                if self.selected > 0 {
+                    self.selected -= 1;
+                } else {
+                    // Wrap to bottom
+                    self.selected = self.history_filtered.len() - 1;
+                }
+
+                // Update scroll if needed
+                if self.selected < self.scroll_offset {
+                    self.scroll_offset = self.selected;
+                }
+            }
+            return;
+        }
+
         // Row-major: move up one row (subtract num_cols)
         if self.selected >= self.num_cols {
             self.selected -= self.num_cols;
@@ -2124,6 +2449,29 @@ impl FileBrowser {
     }
 
     fn select_down(&mut self) {
+        // In history mode, just move down one item (list mode) with wrapping
+        if self.history_mode {
+            if !self.history_filtered.is_empty() {
+                if self.selected + 1 < self.history_filtered.len() {
+                    self.selected += 1;
+                } else {
+                    // Wrap to top
+                    self.selected = 0;
+                }
+
+                // Update scroll if needed
+                if let Ok((_, height)) = terminal::size() {
+                    let max_display_rows = (height as usize).saturating_sub(self.start_row as usize).saturating_sub(2);
+                    if self.selected >= self.scroll_offset + max_display_rows {
+                        self.scroll_offset = self.selected - max_display_rows + 1;
+                    } else if self.selected < self.scroll_offset {
+                        self.scroll_offset = self.selected;
+                    }
+                }
+            }
+            return;
+        }
+
         // Row-major: move down one row (add num_cols)
         let new_idx = self.selected + self.num_cols;
         if new_idx < self.entries.len() {
@@ -2182,12 +2530,64 @@ impl FileBrowser {
         }
     }
 
+    fn filter_history(&mut self) {
+        // Filter history based on query
+        let all_entries = self.dir_history.get_sorted_by_frecency();
+
+        if self.history_query.is_empty() {
+            self.history_filtered = Vec::new();
+        } else {
+            let mut filtered: Vec<(DirectoryEntry, bool)> = all_entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let basename = entry.path.rsplit('/').next().unwrap_or("");
+                    let (matches_full, matches_basename) = if self.settings.case_sensitive_search {
+                        (entry.path.contains(&self.history_query), basename.contains(&self.history_query))
+                    } else {
+                        (
+                            entry.path.to_lowercase().contains(&self.history_query.to_lowercase()),
+                            basename.to_lowercase().contains(&self.history_query.to_lowercase())
+                        )
+                    };
+
+                    if matches_full {
+                        Some((entry, matches_basename))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Sort: basename matches first if enabled
+            if self.settings.history_prioritize_basename {
+                filtered.sort_by(|a, b| {
+                    match (b.1, a.1) {
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
+
+            self.history_filtered = filtered
+                .into_iter()
+                .map(|(entry, _)| entry)
+                .take(self.settings.history_max_results)
+                .collect();
+        }
+
+        // Reset selection
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
     fn fuzzy_match(&self) -> (Option<usize>, usize) {
         // Find all entries that match the fuzzy query and return (first_match, count)
         if self.fuzzy_query.is_empty() {
             return (None, 0);
         }
 
+        // Normal mode: match against file names
         let matches: Vec<usize> = self.entries.iter().enumerate()
             .filter_map(|(idx, entry)| {
                 if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
@@ -2243,6 +2643,9 @@ impl FileBrowser {
                 } else {
                     self.error_message = Some(format!("Cannot access: {}", e));
                 }
+            } else {
+                // Successfully loaded directory, record visit
+                self.record_directory_visit();
             }
             Ok(false)
         } else {
@@ -2257,6 +2660,7 @@ impl FileBrowser {
             self.breadcrumbs.pop();
             self.current_dir = parent.to_path_buf();
             self.load_entries()?;
+            self.record_directory_visit();
         }
         Ok(())
     }
@@ -2266,8 +2670,14 @@ impl FileBrowser {
             self.current_dir = PathBuf::from(home);
             self.breadcrumbs.clear();
             self.load_entries()?;
+            self.record_directory_visit();
         }
         Ok(())
+    }
+
+    fn record_directory_visit(&mut self) {
+        self.dir_history.record_visit(&self.current_dir, self.settings.history_max_storage);
+        let _ = self.dir_history.save();
     }
 
     fn get_current_dir(&self) -> &PathBuf {
@@ -2308,6 +2718,7 @@ impl FileBrowser {
                     self.breadcrumbs.push(name.to_string());
                 }
                 self.load_entries()?;
+                self.record_directory_visit();
             }
         }
         Ok(())
@@ -2347,6 +2758,7 @@ impl FileBrowser {
                     self.breadcrumbs.push(name.to_string());
                 }
                 self.load_entries()?;
+                self.record_directory_visit();
             }
         }
         Ok(())
@@ -2923,6 +3335,68 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                 // Clear error message on any key press
                 browser.error_message = None;
 
+                // Handle history mode (zoxide-style)
+                if browser.history_mode {
+                    match code {
+                        KeyCode::Esc => {
+                            // Exit history mode
+                            browser.history_mode = false;
+                            browser.history_query.clear();
+                            browser.history_filtered.clear();
+                            continue;
+                        }
+                        KeyCode::Char('q') => {
+                            // Exit both history mode and app
+                            browser.history_mode = false;
+                            return Ok(ExitAction::Cd(browser.get_current_dir().clone()));
+                        }
+                        KeyCode::Enter => {
+                            // Jump to selected directory
+                            if !browser.history_filtered.is_empty() && browser.selected < browser.history_filtered.len() {
+                                let target_path = PathBuf::from(&browser.history_filtered[browser.selected].path);
+                                if target_path.exists() && target_path.is_dir() {
+                                    browser.history_mode = false;
+                                    browser.history_query.clear();
+                                    browser.current_dir = target_path;
+                                    browser.breadcrumbs.clear();
+                                    let _ = browser.load_entries();
+                                    browser.record_directory_visit();
+                                }
+                            }
+                            continue;
+                        }
+                        KeyCode::Up => {
+                            browser.select_up();
+                            continue;
+                        }
+                        KeyCode::Down => {
+                            browser.select_down();
+                            continue;
+                        }
+                        KeyCode::Tab => {
+                            // Tab: cycle down through results
+                            browser.select_down();
+                            continue;
+                        }
+                        KeyCode::BackTab => {
+                            // Shift+Tab: cycle up through results
+                            browser.select_up();
+                            continue;
+                        }
+                        KeyCode::Backspace => {
+                            browser.history_query.pop();
+                            browser.filter_history();
+                            continue;
+                        }
+                        KeyCode::Char(ch) => {
+                            browser.history_query.push(ch);
+                            browser.filter_history();
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+
                 // Handle fuzzy find mode
                 if browser.fuzzy_mode {
                     match code {
@@ -3247,6 +3721,15 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         browser.fuzzy_prev_count = browser.entries.len();
                         // fuzzy_home (?) always uses stay mode, fuzzy_find (/) uses jump mode unless Shift is held
                         browser.fuzzy_jump_mode = browser.keybindings.contains(&browser.keybindings.fuzzy_find, ch) && !modifiers.contains(KeyModifiers::SHIFT);
+                        continue;
+                    }
+                    if browser.keybindings.contains(&browser.keybindings.history_jump, ch) {
+                        // Enter history navigation mode (zoxide-style)
+                        browser.history_mode = true;
+                        browser.history_query.clear();
+                        browser.history_filtered.clear();
+                        browser.selected = 0;
+                        browser.scroll_offset = 0;
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.preview_height_decrease, ch) {
