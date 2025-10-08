@@ -1,1 +1,6 @@
 /target
+
+# Homebrew testing outputs
+bottle_output.txt
+linkage_output.txt
+skipped_or_failed_formulae*.txt

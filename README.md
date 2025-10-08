@@ -56,11 +56,13 @@ Press `!` to toggle the help menu.
 
 ## Configuration
 
-Configuration files live in `~/.config/ils/`:
+All configuration is stored in `~/.config/ils/config.toml`:
 
-- `keybindings.toml` - customize keybindings
-- `colors.toml` - path bar colors (supports hex)
-- `preview_ratio` - preview height (auto-saved)
+- Keybindings - customize all keyboard shortcuts
+- Colors - path bar, directories, files, preview (supports hex)
+- Settings - behavior, preview, search, and more
+
+Edit with: `ils config` or `ils --help` for all options
 
 ## How it works
 

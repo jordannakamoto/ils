@@ -28,31 +28,23 @@ use serde::{Deserialize, Serialize};
 fn install() -> io::Result<()> {
     println!("Installing ils...\n");
 
-    // Create config directory
     let home = env::var("HOME").map_err(|_| io::Error::new(io::ErrorKind::Other, "HOME not set"))?;
     let config_dir = PathBuf::from(&home).join(".config/ils");
+
+    // Create config directory
     fs::create_dir_all(&config_dir)?;
     println!("✓ Created config directory: {}", config_dir.display());
 
-    // Create default keybindings
-    let keybindings = Keybindings::default();
-    keybindings.save()?;
-    println!("✓ Created default keybindings: {}/.config/ils/keybindings.toml", home);
-
-    // Create default color config
-    let color_config = ColorConfig::default();
-    color_config.save()?;
-    println!("✓ Created default color config: {}/.config/ils/colors.toml", home);
-
-    // Create default settings
-    let settings = Settings::default();
-    settings.save()?;
-    println!("✓ Created default settings: {}/.config/ils/settings.toml", home);
-
-    // Create default preview ratio
-    let preview_ratio_path = config_dir.join("preview_ratio");
-    fs::write(&preview_ratio_path, "0.5")?;
-    println!("✓ Created preview ratio config: {}", preview_ratio_path.display());
+    // Create unified config file if it doesn't exist
+    if let Some(config_path) = Config::path() {
+        if config_path.exists() {
+            println!("✓ Config file already exists: {}", config_path.display());
+            println!("  (preserving your existing configuration)");
+        } else {
+            Config::create_default()?;
+            println!("✓ Created default config: {}", config_path.display());
+        }
+    }
 
     // Detect shell and add function
     let shell_rc = if PathBuf::from(&home).join(".zshrc").exists() {
@@ -113,6 +105,55 @@ fn print_shell_function() {
     fi
 }}
 "#);
+}
+
+fn check_wrapper_installed() -> bool {
+    // Check if running from shell wrapper by checking if we're called as 'ils' or 'ils-bin'
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_name) = exe_path.file_name() {
+            // If called as 'ils-bin', we might be running from shell wrapper or directly
+            // Check for ILS_WRAPPER_ACTIVE env var that the wrapper should set
+            if exe_name == "ils-bin" && env::var("ILS_WRAPPER_ACTIVE").is_ok() {
+                return true;
+            }
+        }
+    }
+
+    // Alternative check: Look for the wrapper function in common shell configs
+    let home = match env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+
+    let rc_files = vec![
+        PathBuf::from(&home).join(".zshrc"),
+        PathBuf::from(&home).join(".bashrc"),
+        PathBuf::from(&home).join(".config/fish/config.fish"),
+    ];
+
+    for rc_file in rc_files {
+        if rc_file.exists() {
+            if let Ok(content) = fs::read_to_string(&rc_file) {
+                // Check for the ils wrapper function (must be on non-commented line)
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    // Skip comment lines
+                    if trimmed.starts_with('#') {
+                        continue;
+                    }
+                    // Check for ils() function definition
+                    if trimmed.contains("ils()") || trimmed.contains("function ils") {
+                        // Also verify the function contains /tmp/ils_cd logic
+                        if content.contains("/tmp/ils_cd") {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -277,6 +318,10 @@ struct Settings {
     verbose_dates: bool,
     #[serde(default = "default_debug_show_welcome")]
     debug_show_welcome: bool,
+    #[serde(default = "default_wrapper_validation_cache_valid")]
+    wrapper_validation_cache_valid: bool,
+    #[serde(default = "default_show_help_on_start")]
+    show_help_on_start: bool,
 }
 
 fn default_exit_after_edit() -> bool {
@@ -311,6 +356,14 @@ fn default_debug_show_welcome() -> bool {
     false
 }
 
+fn default_wrapper_validation_cache_valid() -> bool {
+    false
+}
+
+fn default_show_help_on_start() -> bool {
+    true
+}
+
 fn default_preview_split_ratio() -> f32 {
     0.5
 }
@@ -337,6 +390,8 @@ impl Default for Settings {
             show_tilde_for_home: default_show_tilde_for_home(),
             verbose_dates: default_verbose_dates(),
             debug_show_welcome: default_debug_show_welcome(),
+            wrapper_validation_cache_valid: default_wrapper_validation_cache_valid(),
+            show_help_on_start: default_show_help_on_start(),
         }
     }
 }
@@ -379,6 +434,19 @@ impl Config {
         }
     }
 
+    fn save(&self) -> io::Result<()> {
+        if let Some(config_path) = Config::path() {
+            if let Some(parent) = config_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let content = toml::to_string_pretty(self).map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, e)
+            })?;
+            fs::write(config_path, content)?;
+        }
+        Ok(())
+    }
+
     fn create_default() -> io::Result<()> {
         if let Some(config_path) = Config::path() {
             if let Some(parent) = config_path.parent() {
@@ -414,8 +482,8 @@ help = ['!']                    # Show help screen
 preview_toggle = ['p']          # Toggle preview pane
 preview_up = ['i']             # Scroll preview up
 preview_down = ['o']           # Scroll preview down
-preview_height_decrease = ['_']
-preview_height_increase = ['=']
+preview_height_decrease = ['-'] # Decrease preview pane height
+preview_height_increase = ['+'] # Increase preview pane height
 
 # Other
 toggle_hidden = ['.']          # Toggle hidden files
@@ -519,6 +587,12 @@ verbose_dates = false
 
 # Debug: Force show welcome wizard on every run (default: false)
 debug_show_welcome = false
+
+# Show help menu on first start (default: true)
+show_help_on_start = true
+
+# Internal: Cache for shell wrapper validation (automatically set, do not modify)
+wrapper_validation_cache_valid = false
 "##;
 
             fs::write(&config_path, default_config)?;
@@ -727,8 +801,8 @@ impl Default for Keybindings {
             preview_toggle: vec!['p'],
             preview_up: vec!['i'],
             preview_down: vec!['o'],
-            preview_height_decrease: vec!['_'],
-            preview_height_increase: vec!['='],
+            preview_height_decrease: vec!['-'],
+            preview_height_increase: vec!['+'],
             toggle_hidden: vec!['.'],
             fuzzy_find: vec!['/'],
             fuzzy_back: vec!['/'],
@@ -837,9 +911,61 @@ struct FileBrowser {
     show_created_date: bool, // Toggle between modified and created date
     error_message: Option<String>, // Error message to display
     input_block_until: Option<std::time::Instant>, // Block input until this time
+    wrapper_warning: bool, // Whether to show wrapper not installed warning
 }
 
 impl FileBrowser {
+    fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+        if max_width == 0 {
+            return vec![text.to_string()];
+        }
+
+        let mut lines = Vec::new();
+        let mut current_line = String::new();
+        let mut current_width = 0;
+
+        for ch in text.chars() {
+            let ch_width = if ch.is_ascii() { 1 } else { 1 }; // Simplified: treat all chars as width 1
+
+            if current_width + ch_width > max_width {
+                // Start new line
+                if !current_line.is_empty() {
+                    lines.push(current_line.clone());
+                    current_line.clear();
+                    current_width = 0;
+                }
+            }
+
+            current_line.push(ch);
+            current_width += ch_width;
+        }
+
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+
+        if lines.is_empty() {
+            vec![String::new()]
+        } else {
+            lines
+        }
+    }
+
+    fn truncate_string_safe(s: &str, max_width: usize) -> String {
+        if max_width <= 3 {
+            return "...".to_string();
+        }
+
+        let char_count: usize = s.chars().count();
+        if char_count <= max_width {
+            return s.to_string();
+        }
+
+        // Take max_width - 3 characters and add "..."
+        let truncated: String = s.chars().take(max_width.saturating_sub(3)).collect();
+        format!("{}...", truncated)
+    }
+
     fn format_path_display(&self) -> String {
         if self.settings.show_tilde_for_home {
             if let Some(home) = env::var("HOME").ok() {
@@ -871,17 +997,15 @@ impl FileBrowser {
             (Config::default(), None)
         };
 
-        // Load saved show_help state, or show help on first run
-        let show_help = Self::load_show_help().unwrap_or_else(|| {
-            Config::path().map(|p| !p.exists()).unwrap_or(true)
-        });
-
         let keybindings = config.keybindings;
         let color_config = config.colors;
         let settings = config.settings;
 
-        // Load saved preview split ratio (use saved value if exists, otherwise use config)
-        let preview_split_ratio = Self::load_preview_ratio().unwrap_or(settings.preview_split_ratio);
+        // Use show_help setting from config
+        let show_help = settings.show_help_on_start;
+
+        // Use preview split ratio from config
+        let preview_split_ratio = settings.preview_split_ratio;
 
         // start drawing content on the row *after* the initial position
         let mut browser = FileBrowser {
@@ -920,6 +1044,7 @@ impl FileBrowser {
             show_created_date: false,
             error_message: None,
             input_block_until: None,
+            wrapper_warning: false,
         };
         browser.load_entries()?;
         // Don't calculate layout here - will be done on first draw for faster startup
@@ -1013,52 +1138,25 @@ impl FileBrowser {
         }
     }
 
-    fn load_preview_ratio() -> Option<f32> {
-        let home = env::var("HOME").ok()?;
-        let config_path = PathBuf::from(home).join(".config/ils/preview_ratio");
-        let content = fs::read_to_string(config_path).ok()?;
-        content.trim().parse().ok()
-    }
-
     fn save_preview_ratio(&self) -> io::Result<()> {
-        if let Ok(home) = env::var("HOME") {
-            let config_dir = PathBuf::from(home).join(".config/ils");
-            fs::create_dir_all(&config_dir)?;
-            let config_path = config_dir.join("preview_ratio");
-            fs::write(config_path, self.preview_split_ratio.to_string())?;
-        }
-        Ok(())
-    }
-
-    fn load_show_help() -> Option<bool> {
-        let home = env::var("HOME").ok()?;
-        let config_path = PathBuf::from(home).join(".config/ils/show_help");
-        let content = fs::read_to_string(config_path).ok()?;
-        content.trim().parse().ok()
+        // Load current config, update preview_split_ratio, and save
+        let (mut config, _) = Config::load();
+        config.settings.preview_split_ratio = self.preview_split_ratio;
+        config.save()
     }
 
     fn save_show_help_state(&self) -> io::Result<()> {
-        if let Ok(home) = env::var("HOME") {
-            let config_dir = PathBuf::from(home).join(".config/ils");
-            fs::create_dir_all(&config_dir)?;
-            let config_path = config_dir.join("show_help");
-            fs::write(config_path, self.show_help.to_string())?;
-        }
-        Ok(())
+        // Load current config, update show_help_on_start, and save
+        let (mut config, _) = Config::load();
+        config.settings.show_help_on_start = self.show_help;
+        config.save()
     }
 
     fn save_show_hidden(&self) -> io::Result<()> {
-        if let Some(config_path) = Config::path() {
-            if let Ok(content) = fs::read_to_string(&config_path) {
-                if let Ok(mut config) = toml::from_str::<Config>(&content) {
-                    config.settings.show_hidden = self.show_hidden;
-                    if let Ok(new_content) = toml::to_string_pretty(&config) {
-                        fs::write(&config_path, new_content)?;
-                    }
-                }
-            }
-        }
-        Ok(())
+        // Load current config, update show_hidden, and save
+        let (mut config, _) = Config::load();
+        config.settings.show_hidden = self.show_hidden;
+        config.save()
     }
 
     fn load_entries(&mut self) -> io::Result<()> {
@@ -1904,7 +2002,7 @@ impl FileBrowser {
         } else if self.list_mode {
             // List mode help
             format!(
-                " {}/{}/{}/{} Nav │ {} Forward │ Enter Open │ {} Back │ {} Home │ Space Info │ e Extra │ {} Grid Mode │ {} Find │ {} Preview │ {} Exit │ ! Toggle Help",
+                " {}/{}/{}/{} Nav │ {} Forward │ {} Back │ Enter Open │ {} Home │ Space Info │ e Extra │ {} Grid Mode │ {} Find │ {} Preview │ {} Exit │ Shift+{} Exit to Finder │ ! Toggle Help",
                 fmt_keys(&self.keybindings.up),
                 fmt_keys(&self.keybindings.down),
                 fmt_keys(&self.keybindings.left),
@@ -1915,12 +2013,13 @@ impl FileBrowser {
                 fmt_keys(&self.keybindings.toggle_mode),
                 fmt_keys(&self.keybindings.fuzzy_find),
                 fmt_keys(&self.keybindings.preview_toggle),
+                fmt_keys(&self.keybindings.quit),
                 fmt_keys(&self.keybindings.quit)
             )
         } else {
             // Normal (grid) mode help
             format!(
-                " {}/{}/{}/{} Nav │ {} Forward │ Enter Open │ {} Back │ {} Home │ {}/{} Sibling │ {} Find │ {} List Mode │ {} Preview │ {} Exit │ ! Toggle Help",
+                " {}/{}/{}/{} Nav │ {} Forward │ {} Back │ Enter Open │ {} Home │ {}/{} Sibling │ {} Find │ {} List Mode │ {} Preview │ {} Exit │ Shift+{} Exit to Finder │ ! Toggle Help",
                 fmt_keys(&self.keybindings.up),
                 fmt_keys(&self.keybindings.down),
                 fmt_keys(&self.keybindings.left),
@@ -1933,6 +2032,7 @@ impl FileBrowser {
                 fmt_keys(&self.keybindings.fuzzy_find),
                 fmt_keys(&self.keybindings.toggle_mode),
                 fmt_keys(&self.keybindings.preview_toggle),
+                fmt_keys(&self.keybindings.quit),
                 fmt_keys(&self.keybindings.quit)
             )
         };
@@ -1940,47 +2040,71 @@ impl FileBrowser {
         // File operations help (second row) - only show in grid/list mode
         let file_ops_text = if !self.fuzzy_mode && !self.preview_mode {
             Some(format!(
-                " {} New │ {} Rename │ {}/{} Copy/Paste │ {} Trash │ {} Delete │ {} Undo │ Shift+{} Exit to Finder",
+                " File Operations: {} New │ {} Rename │ {}/{} Copy/Paste │ {} Trash │ {} Delete │ {} Undo",
                 fmt_keys(&self.keybindings.create),
                 fmt_keys(&self.keybindings.rename),
                 fmt_keys(&self.keybindings.copy),
                 fmt_keys(&self.keybindings.paste),
                 fmt_keys(&self.keybindings.trash),
                 fmt_keys(&self.keybindings.delete),
-                fmt_keys(&self.keybindings.undo),
-                fmt_keys(&self.keybindings.quit)
+                fmt_keys(&self.keybindings.undo)
             ))
         } else {
             None
         };
 
-        // Determine rows for help text
+        // Determine rows for help text (account for wrapper warning if present)
+        let wrapper_warning_offset = if self.wrapper_warning { 1 } else { 0 };
         let (help_row, file_ops_row) = if self.fuzzy_mode {
-            (height.saturating_sub(2), None)
+            (height.saturating_sub(2 + wrapper_warning_offset), None)
         } else if file_ops_text.is_some() {
-            (height.saturating_sub(2), Some(height.saturating_sub(1)))
+            (height.saturating_sub(2 + wrapper_warning_offset), Some(height.saturating_sub(1 + wrapper_warning_offset)))
         } else {
-            (height.saturating_sub(1), None)
+            (height.saturating_sub(1 + wrapper_warning_offset), None)
         };
 
-        // Draw main help row
-        queue!(
-            stdout,
-            cursor::MoveTo(0, help_row),
-            SetForegroundColor(Color::DarkGrey),
-            Print(&help_text),
-            ResetColor
-        )?;
-
-        // Draw file operations row if present
-        if let (Some(ops_text), Some(ops_row)) = (file_ops_text, file_ops_row) {
+        // Draw wrapper warning if needed (above help text)
+        if self.wrapper_warning {
+            let warning_row = height.saturating_sub(1);
+            let warning_text = " ⚠ WARNING: Shell wrapper not detected! Navigation (cd) won't work. Run: ils --install";
+            let truncated_warning = Self::truncate_string_safe(warning_text, width as usize);
             queue!(
                 stdout,
-                cursor::MoveTo(0, ops_row),
-                SetForegroundColor(Color::DarkGrey),
-                Print(&ops_text),
+                cursor::MoveTo(0, warning_row),
+                SetForegroundColor(Color::Red),
+                crossterm::style::SetAttribute(crossterm::style::Attribute::Bold),
+                Print(&truncated_warning),
+                crossterm::style::SetAttribute(crossterm::style::Attribute::Reset),
                 ResetColor
             )?;
+        }
+
+        // Draw main help row (with wrapping)
+        let help_lines = Self::wrap_text(&help_text, width as usize);
+        for (i, line) in help_lines.iter().enumerate() {
+            let row = help_row.saturating_sub(help_lines.len().saturating_sub(1) as u16).saturating_add(i as u16);
+            queue!(
+                stdout,
+                cursor::MoveTo(0, row),
+                SetForegroundColor(Color::DarkGrey),
+                Print(line),
+                ResetColor
+            )?;
+        }
+
+        // Draw file operations row if present (with wrapping, use cyan color)
+        if let (Some(ops_text), Some(ops_row)) = (file_ops_text, file_ops_row) {
+            let ops_lines = Self::wrap_text(&ops_text, width as usize);
+            for (i, line) in ops_lines.iter().enumerate() {
+                let row = ops_row.saturating_sub(ops_lines.len().saturating_sub(1) as u16).saturating_add(i as u16);
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, row),
+                    SetForegroundColor(Color::Cyan),
+                    Print(line),
+                    ResetColor
+                )?;
+            }
         }
 
         Ok(())
@@ -2511,7 +2635,7 @@ impl FileBrowser {
 }
 
 fn show_welcome_pages() -> io::Result<()> {
-    use crossterm::event::{self, Event, KeyCode};
+    use crossterm::event::{self, Event};
 
     // Page 1: Shell Integration Setup (Important)
     println!("\n{}", "=".repeat(60));
@@ -2587,7 +2711,7 @@ ils() {
     println!("  • Press ! at any time to toggle the help menu");
     println!("    The help menu shows context-aware keybindings for");
     println!("    navigation, file operations, and more.\n");
-    println!("  • Run 'ils --config' to view/edit configuration");
+    println!("  • Run 'ils config' to view/edit configuration");
     println!("    Customize keybindings, colors, and behavior.\n");
     println!("  • Configuration location: ~/.config/ils/\n");
     println!("{}", "-".repeat(60));
@@ -2614,12 +2738,35 @@ ils() {
     Ok(())
 }
 
+fn print_help() {
+    println!("ils v0.1.1 - Interactive file browser for the terminal\n");
+    println!("USAGE:");
+    println!("    ils [OPTIONS]\n");
+    println!("OPTIONS:");
+    println!("    -h, --help       Show this help message");
+    println!("    -v, --version    Show version information");
+    println!("    --install        Install shell integration and create default config");
+    println!("    --config, config Open configuration file in $EDITOR\n");
+    println!("INTERACTIVE KEYS:");
+    println!("    Press '!' inside ils to toggle the help menu with all keybindings\n");
+    println!("CONFIGURATION:");
+    println!("    Config location: ~/.config/ils/config.toml");
+    println!("    Edit with: ils config\n");
+    println!("For more information, visit: https://github.com/jordannakamoto/ils");
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
+    // Check for --help flag
+    if args.len() > 1 && (args[1] == "--help" || args[1] == "-h" || args[1] == "help") {
+        print_help();
+        return Ok(());
+    }
+
     // Check for --version flag
     if args.len() > 1 && (args[1] == "--version" || args[1] == "-v") {
-        println!("ils v0.1.0");
+        println!("ils v0.1.1");
         return Ok(());
     }
 
@@ -2687,8 +2834,28 @@ ils() {{
         show_welcome_pages()?;
     }
 
+    // Check if wrapper is installed (with caching)
+    let mut wrapper_installed = config.settings.wrapper_validation_cache_valid;
+    if !wrapper_installed {
+        // Perform the check
+        wrapper_installed = check_wrapper_installed();
+
+        // Update cache if wrapper is installed
+        if wrapper_installed {
+            if let Some(config_path) = Config::path() {
+                // Reload config, update cache flag, and save
+                let (mut updated_config, _) = Config::load();
+                updated_config.settings.wrapper_validation_cache_valid = true;
+                let _ = updated_config.save();
+            }
+        }
+    }
+
     let start_dir = env::current_dir()?;
     let mut browser = FileBrowser::new(start_dir)?;
+
+    // Set wrapper warning flag if not installed
+    browser.wrapper_warning = !wrapper_installed;
 
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
