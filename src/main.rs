@@ -1102,7 +1102,11 @@ struct FileBrowser {
     list_mode: bool, // Whether to show in list mode (vs grid mode)
     list_info_mode: u8, // 0 = none, 1 = modified date, 2 = permissions, 3 = size
     show_line_numbers: bool, // Whether to show line numbers in preview
-    clipboard: Option<PathBuf>, // Copied file/directory path
+    clipboard: Option<PathBuf>, // Copied file/directory path (single copy, deprecated)
+    clipboard_selection: Vec<PathBuf>, // Multi-select clipboard for copy operations
+    copy_in_progress: bool, // Whether a paste operation is currently in progress
+    copy_progress_current: usize, // Current item being copied
+    copy_progress_total: usize, // Total items to copy
     undo_stack: Vec<UndoAction>, // Undo history
     redo_stack: Vec<UndoAction>, // Redo history
     keybindings: Keybindings,
@@ -1240,6 +1244,10 @@ impl FileBrowser {
             list_info_mode: 0,
             show_line_numbers: true,
             clipboard: None,
+            clipboard_selection: Vec::new(),
+            copy_in_progress: false,
+            copy_progress_current: 0,
+            copy_progress_total: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             keybindings,
@@ -2255,8 +2263,31 @@ impl FileBrowser {
             )?;
         }
 
-        // Display error message if present
-        if let Some(ref error_msg) = self.error_message {
+        // Display copy/paste status bar if there are items selected or operation in progress
+        if self.copy_in_progress {
+            // Show paste progress with background
+            queue!(
+                stdout,
+                cursor::MoveTo(0, height - 1),
+                SetForegroundColor(Color::Black),
+                crossterm::style::SetBackgroundColor(Color::Cyan),
+                Print(format!(" Pasting {}/{} items... ", self.copy_progress_current, self.copy_progress_total)),
+                ResetColor
+            )?;
+        } else if !self.clipboard_selection.is_empty() {
+            // Show number of items in copy selection with background
+            let count = self.clipboard_selection.len();
+            let item_word = if count == 1 { "item" } else { "items" };
+            queue!(
+                stdout,
+                cursor::MoveTo(0, height - 1),
+                SetForegroundColor(Color::Black),
+                crossterm::style::SetBackgroundColor(Color::Yellow),
+                Print(format!(" {} {} selected for copy (c: add/remove, C: clear, v: paste) ", count, item_word)),
+                ResetColor
+            )?;
+        } else if let Some(ref error_msg) = self.error_message {
+            // Display error message if present
             queue!(
                 stdout,
                 cursor::MoveTo(0, height - 1),
@@ -2770,10 +2801,42 @@ impl FileBrowser {
         }
     }
 
+    fn toggle_copy_selection(&mut self) {
+        if let Some(path) = self.get_selected_path() {
+            // Toggle the item in the clipboard_selection
+            if let Some(pos) = self.clipboard_selection.iter().position(|p| p == &path) {
+                // Already in selection, remove it
+                self.clipboard_selection.remove(pos);
+            } else {
+                // Not in selection, add it
+                self.clipboard_selection.push(path);
+            }
+        }
+    }
+
+    fn clear_copy_selection(&mut self) {
+        self.clipboard_selection.clear();
+    }
+
     fn paste_from_clipboard(&mut self) -> io::Result<()> {
-        if let Some(src) = &self.clipboard {
+        // Use multi-select clipboard if it has items, otherwise fall back to single clipboard
+        let sources: Vec<PathBuf> = if !self.clipboard_selection.is_empty() {
+            self.clipboard_selection.clone()
+        } else if let Some(src) = &self.clipboard {
+            vec![src.clone()]
+        } else {
+            return Ok(());
+        };
+
+        // Set up progress tracking
+        self.copy_in_progress = true;
+        self.copy_progress_total = sources.len();
+
+        for (idx, src) in sources.iter().enumerate() {
+            self.copy_progress_current = idx + 1;
+
             if !src.exists() {
-                return Ok(()); // Source no longer exists
+                continue; // Skip files that no longer exist
             }
 
             let file_name = src.file_name().unwrap();
@@ -2793,6 +2856,9 @@ impl FileBrowser {
                 counter += 1;
             }
 
+            // Redraw to show progress
+            self.draw()?;
+
             // Copy file or directory recursively
             if src.is_dir() {
                 self.copy_dir_recursive(src, &dest)?;
@@ -2804,9 +2870,14 @@ impl FileBrowser {
                 src: src.clone(),
                 dest: dest.clone()
             });
-            self.redo_stack.clear();
-            self.load_entries()?;
         }
+
+        // Clear progress and reset
+        self.copy_in_progress = false;
+        self.copy_progress_current = 0;
+        self.copy_progress_total = 0;
+        self.redo_stack.clear();
+        self.load_entries()?;
         Ok(())
     }
 
@@ -3659,8 +3730,16 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         }
                         continue;
                     }
-                    if browser.keybindings.contains(&browser.keybindings.copy, ch) {
-                        browser.copy_to_clipboard();
+                    // Handle both 'c' and 'C' for copy operations
+                    if browser.keybindings.contains(&browser.keybindings.copy, ch) ||
+                       (ch == 'C' && browser.keybindings.copy.contains(&'c')) {
+                        if ch == 'C' || modifiers.contains(KeyModifiers::SHIFT) {
+                            // Shift+C: Clear multi-copy selection
+                            browser.clear_copy_selection();
+                        } else {
+                            // c: Toggle item in multi-copy selection
+                            browser.toggle_copy_selection();
+                        }
                         continue;
                     }
                     if browser.keybindings.contains(&browser.keybindings.paste, ch) {
