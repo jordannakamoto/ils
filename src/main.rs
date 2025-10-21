@@ -193,6 +193,7 @@ struct Keybindings {
     jump_down: Vec<char>,
     jump_left: Vec<char>,
     jump_right: Vec<char>,
+    quicklook: Vec<char>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -668,7 +669,7 @@ quit_then_open_in_finder = ['Q'] # Quit and open current directory in Finder (Sh
 help = ['!']                    # Show help screen
 
 # Preview controls
-preview_toggle = ['p']          # Toggle preview pane
+preview_toggle = ['P']          # Toggle preview pane (Shift+p)
 preview_up = ['i']             # Scroll preview up
 preview_down = ['o']           # Scroll preview down
 preview_height_decrease = ['-'] # Decrease preview pane height
@@ -695,6 +696,7 @@ delete = ['X']                 # Permanently delete (Shift+x)
 undo = ['z']                   # Undo last action
 redo = ['Z']                   # Redo last undone action (Shift+z)
 create = ['y']                 # Create new file or directory
+quicklook = [' ']              # Open selected file in macOS Quick Look (Space)
 
 # ============================================================================
 # COLORS
@@ -802,6 +804,7 @@ impl Default for Config {
 }
 
 impl Settings {
+    #[allow(dead_code)]
     fn save(&self) -> io::Result<()> {
         if let Ok(home) = env::var("HOME") {
             let config_dir = PathBuf::from(home).join(".config/ils");
@@ -843,6 +846,7 @@ impl Default for ColorConfig {
 }
 
 impl ColorConfig {
+    #[allow(dead_code)]
     fn load() -> Self {
         if let Ok(home) = env::var("HOME") {
             let config_path = PathBuf::from(home).join(".config/ils/colors.toml");
@@ -855,6 +859,7 @@ impl ColorConfig {
         Self::default()
     }
 
+    #[allow(dead_code)]
     fn save(&self) -> io::Result<()> {
         if let Ok(home) = env::var("HOME") {
             let config_dir = PathBuf::from(home).join(".config/ils");
@@ -1003,7 +1008,7 @@ impl Default for Keybindings {
             quit: vec!['q'],
             quit_then_open_in_finder: vec!['Q'],
             help: vec!['?'],
-            preview_toggle: vec!['p'],
+            preview_toggle: vec!['P'],
             preview_up: vec!['i'],
             preview_down: vec!['o'],
             preview_height_decrease: vec!['-'],
@@ -1028,11 +1033,13 @@ impl Default for Keybindings {
             jump_down: vec!['S'],
             jump_left: vec!['A'],
             jump_right: vec!['D'],
+            quicklook: vec![' '],
         }
     }
 }
 
 impl Keybindings {
+    #[allow(dead_code)]
     fn load() -> Self {
         if let Ok(home) = env::var("HOME") {
             let config_path = PathBuf::from(home).join(".config/ils/keybindings.toml");
@@ -1045,6 +1052,7 @@ impl Keybindings {
         Self::default()
     }
 
+    #[allow(dead_code)]
     fn save(&self) -> io::Result<()> {
         if let Ok(home) = env::var("HOME") {
             let config_dir = PathBuf::from(home).join(".config/ils");
@@ -1065,6 +1073,7 @@ impl Keybindings {
 
 // Action for undo/redo
 #[derive(Clone)]
+#[allow(dead_code)]
 enum UndoAction {
     Copy { src: PathBuf, dest: PathBuf },
     Move { src: PathBuf, dest: PathBuf },
@@ -1303,6 +1312,7 @@ impl FileBrowser {
 
     fn calculate_all_dir_sizes(&mut self) -> io::Result<()> {
         self.calculating_sizes = true;
+        self.draw()?; // Show "Calculating..." tooltip
         for entry in &self.entries {
             if entry.is_dir() && !self.dir_size_cache.contains_key(entry) {
                 let size = Self::calculate_dir_size(entry);
@@ -1346,6 +1356,7 @@ impl FileBrowser {
         });
     }
 
+    #[allow(dead_code)]
     fn config_exists() -> bool {
         if let Ok(home) = env::var("HOME") {
             let config_path = PathBuf::from(home).join(".config/ils/preview_ratio");
@@ -1355,6 +1366,7 @@ impl FileBrowser {
         }
     }
 
+    #[allow(dead_code)]
     fn color_config_exists() -> bool {
         if let Ok(home) = env::var("HOME") {
             let config_path = PathBuf::from(home).join(".config/ils/colors.toml");
@@ -1641,6 +1653,7 @@ impl FileBrowser {
             )?;
         } else {
             // Fixed dimensions for grid
+            #[allow(dead_code)]
             const CELL_WIDTH: usize = 22;
             const NAME_WIDTH: usize = 20;
 
@@ -2274,6 +2287,47 @@ impl FileBrowser {
                 Print(format!(" Pasting {}/{} items... ", self.copy_progress_current, self.copy_progress_total)),
                 ResetColor
             )?;
+        } else if self.calculating_sizes {
+            // Show directory size calculation in progress
+            queue!(
+                stdout,
+                cursor::MoveTo(0, height - 1),
+                SetForegroundColor(Color::Black),
+                crossterm::style::SetBackgroundColor(Color::Cyan),
+                Print(" Calculating directory sizes... "),
+                ResetColor
+            )?;
+        } else if self.list_mode && self.list_info_mode == 3 {
+            // In size mode but not calculating - show hint
+            queue!(
+                stdout,
+                cursor::MoveTo(0, height - 1),
+                SetForegroundColor(Color::Black),
+                crossterm::style::SetBackgroundColor(Color::Blue),
+                Print(" Press 'e' to calculate directory sizes "),
+                ResetColor
+            )?;
+        } else if self.list_mode && self.list_info_mode == 2 {
+            // In permissions mode - show hint
+            queue!(
+                stdout,
+                cursor::MoveTo(0, height - 1),
+                SetForegroundColor(Color::Black),
+                crossterm::style::SetBackgroundColor(Color::Blue),
+                Print(" Press 'e' to edit permissions "),
+                ResetColor
+            )?;
+        } else if self.list_mode && self.list_info_mode == 1 {
+            // In date mode - show hint about toggling
+            let date_type = if self.show_created_date { "created" } else { "modified" };
+            queue!(
+                stdout,
+                cursor::MoveTo(0, height - 1),
+                SetForegroundColor(Color::Black),
+                crossterm::style::SetBackgroundColor(Color::Blue),
+                Print(format!(" Showing {} time (press 'e' to toggle) ", date_type)),
+                ResetColor
+            )?;
         } else if !self.clipboard_selection.is_empty() {
             // Show number of items in copy selection with background
             let count = self.clipboard_selection.len();
@@ -2795,6 +2849,7 @@ impl FileBrowser {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn copy_to_clipboard(&mut self) {
         if let Some(path) = self.get_selected_path() {
             self.clipboard = Some(path);
@@ -2919,6 +2974,26 @@ impl FileBrowser {
                     self.selected = old_selected;
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn open_quicklook(&self) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(path) = self.get_selected_path() {
+                // Use macOS qlmanage to open Quick Look
+                std::process::Command::new("qlmanage")
+                    .arg("-p")
+                    .arg(&path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()?;
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Quick Look is macOS only, do nothing on other platforms
         }
         Ok(())
     }
@@ -3325,7 +3400,7 @@ ils() {{
 
         // Update cache if wrapper is installed
         if wrapper_installed {
-            if let Some(config_path) = Config::path() {
+            if Config::path().is_some() {
                 // Reload config, update cache flag, and save
                 let (mut updated_config, _) = Config::load();
                 updated_config.settings.wrapper_validation_cache_valid = true;
@@ -3766,6 +3841,10 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                         browser.create_new()?;
                         continue;
                     }
+                    if browser.keybindings.contains(&browser.keybindings.quicklook, ch) {
+                        browser.open_quicklook()?;
+                        continue;
+                    }
                     if browser.keybindings.contains(&browser.keybindings.rename, ch) {
                         // Rename functionality
                         if let Some(selected_path) = browser.get_selected_path() {
@@ -3890,10 +3969,36 @@ fn run_browser(browser: &mut FileBrowser) -> io::Result<ExitAction> {
                     KeyCode::Left => browser.select_left(),
                     KeyCode::Right => browser.select_right(),
                     KeyCode::Char(' ') => {
-                        // Space: Toggle list info mode in list mode, or line numbers in preview mode
+                        // Space: Page down in preview mode, Quick Look otherwise
+                        if browser.preview_mode {
+                            // Page down in preview (same as 'O')
+                            if let Some(selected) = browser.get_selected_path() {
+                                if selected.is_file() {
+                                    let (_, height) = terminal::size()?;
+                                    let split_line = browser.start_row + ((height - browser.start_row) as f32 * (1.0 - browser.preview_split_ratio)) as u16;
+                                    let preview_lines = (height - split_line - 3) as usize;
+
+                                    // Get file line count to bound scroll
+                                    if let Ok(file) = fs::File::open(&selected) {
+                                        use io::BufRead;
+                                        let line_count = io::BufReader::new(file).lines().count();
+
+                                        let current = browser.preview_scroll_map.get(&selected).copied().unwrap_or(0);
+                                        let new_scroll = (current + preview_lines).min(line_count.saturating_sub(preview_lines));
+                                        browser.preview_scroll_map.insert(selected, new_scroll);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Not in preview mode: open Quick Look
+                            browser.open_quicklook()?;
+                        }
+                    }
+                    KeyCode::Tab => {
+                        // Tab: Cycle list info mode in list mode, toggle line numbers in preview mode
                         if browser.preview_mode {
                             browser.show_line_numbers = !browser.show_line_numbers;
-                        } else {
+                        } else if browser.list_mode {
                             browser.list_info_mode = (browser.list_info_mode + 1) % 4;
                         }
                     }
